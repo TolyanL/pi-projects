@@ -78,6 +78,9 @@ try:
     send("\r", 0.5); time.sleep(0.5)   # project -> actions
     send("\r", 2.5)                     # open project (last session)
     send("hello\r", 2.0); time.sleep(2.0)
+    send("/project\r", 0.8); time.sleep(1.2)
+    state["project_menu"] = len(raw)
+    send("\x1b", 0.6); time.sleep(0.4)
     os.write(master, b"\x04"); time.sleep(2)
 finally:
     stop.set()
@@ -107,6 +110,7 @@ checks["lock marker is visible"] = state.get("lock_visible", False)
 checks["shared toggle restores the global index"] = "How auth works" in state.get("shared_index", "")
 checks["shared toggle writes registry"] = '"private": false' in state.get("shared_registry", "")
 checks["project is private again at the end"] = '"private": true' in state.get("final_registry", "")
+checks["/project shows the protection state"] = "Protection: private" in plain(bytes(raw[:state.get("project_menu", 0)]))
 
 injected = False
 sessions_root = os.path.join(agent, "sessions")

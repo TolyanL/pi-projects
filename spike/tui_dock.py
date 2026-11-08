@@ -57,8 +57,9 @@ try:
     send("\r", 0.8); time.sleep(0.8)
     t3 = len(raw)
     checks["Files action opens the files stage"] = "Project files" in plain(bytes(raw[:t3]))
-    checks["files stage lists the four rows"] = all(
-        label in plain(bytes(raw[:t3])) for label in ("CONTEXT.md", "NOTES.md", "Notes…", "AGENTS.md")
+    checks["files stage lists the five rows"] = all(
+        label in plain(bytes(raw[:t3]))
+        for label in ("CONTEXT.md", "NOTES.md", "Notes…", "AGENTS.md", "Protection: shared")
     )
     checks["missing files are marked not created"] = "not created" in plain(bytes(raw[:t3]))
 
@@ -72,8 +73,10 @@ try:
     checks["confirm creates CONTEXT.md"] = len(contexts) == 1
     checks["editor returns to the files stage"] = "Project files" in plain(bytes(raw[t_before_editor_esc:t_created]))
 
-    # down twice -> Notes… -> notes list; esc back to files
-    send("\x1b[B", 0.2); send("\x1b[B", 0.2); time.sleep(0.3)
+    # down to Notes… (now below Protection) -> notes list; esc back to files
+    for _ in range(4):
+        send("\x1b[B", 0.2)
+    time.sleep(0.3)
     send("\r", 0.6); time.sleep(0.9)
     t_notes = len(raw)
     checks["Notes row opens the notes list"] = "＋ New note…" in plain(bytes(raw[:t_notes]))

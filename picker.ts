@@ -91,12 +91,15 @@ const ACTIONS: ActionSpec[] = [
   { id: "privacy", label: "Protection" },
 ];
 
-const FILE_ROWS: Array<{ what: EditWhat | "notes"; label: string }> = [
+const FILE_ROWS: Array<{ what: EditWhat | "notes" | "privacy"; label: string }> = [
   { what: "context", label: "CONTEXT.md" },
   { what: "index", label: "NOTES.md" },
-  { what: "notes", label: "Notes…" },
   { what: "agents", label: "AGENTS.md" },
+  { what: "privacy", label: "Protection" },
+  { what: "notes", label: "Notes…" },
 ];
+
+const NOTES_FILE_ROW = FILE_ROWS.findIndex((row) => row.what === "notes");
 
 /** Rows the dock may use: about 60% of the terminal, capped and floored. */
 export function dockBudget(tui: unknown): number {
@@ -199,8 +202,13 @@ function windowStart(count: number, selected: number, visible: number): number {
   return Math.max(0, Math.min(selected - Math.floor(visible / 2), count - visible));
 }
 
-function fileHint(state: DockState, what: EditWhat | "notes"): string {
+function fileHint(state: DockState, what: EditWhat | "notes" | "privacy"): string {
   const files = state.files;
+  if (what === "privacy") {
+    return state.project?.private
+      ? "hidden from INDEX.md and all_project_notes"
+      : "included in INDEX.md and all_project_notes";
+  }
   if (what === "context") {
     return files?.context ? "private context, injected into every request" : "not created";
   }
@@ -225,8 +233,12 @@ export function renderDock(state: DockState, width: number, budget: number, them
     lines.push(topBorder("Project files", width, state.project.name));
     FILE_ROWS.forEach((row, index) => {
       const selected = index === state.fileSelected;
+      const label =
+        row.what === "privacy"
+          ? `Protection: ${state.project?.private ? "private" : "shared"}`
+          : row.label;
       lines.push(
-        boxLine(labeledRow(row.label, theme.fg("muted", fileHint(state, row.what)), selected, theme, inner), width),
+        boxLine(labeledRow(label, theme.fg("muted", fileHint(state, row.what)), selected, theme, inner), width),
       );
     });
     lines.push(separator(width));
@@ -412,6 +424,19 @@ export async function runProjectDock(
       state.noteList = listNotes(deps.paths, state.project);
     };
 
+    const togglePrivacy = () => {
+      const project = state.project;
+      if (!project) return;
+      const next = !project.private;
+      setProjectPrivate(deps.paths, project.id, next);
+      project.private = next;
+      const listed = state.projects.find((entry) => entry.id === project.id);
+      if (listed) listed.private = next;
+      rebuildIndexes(deps.paths);
+      state.files = fileStatusFor(deps.paths, project);
+      rerender();
+    };
+
     const runAction = (action: ActionSpec) => {
       const project = state.project;
       if (!project) return;
@@ -423,14 +448,7 @@ export async function runProjectDock(
         return;
       }
       if (action.id === "privacy") {
-        const next = !project.private;
-        setProjectPrivate(deps.paths, project.id, next);
-        project.private = next;
-        const listed = state.projects.find((entry) => entry.id === project.id);
-        if (listed) listed.private = next;
-        rebuildIndexes(deps.paths);
-        state.files = fileStatusFor(deps.paths, project);
-        rerender();
+        togglePrivacy();
         return;
       }
       if (action.id === "open") done({ kind: "open", project, mode: "last" });
@@ -449,6 +467,10 @@ export async function runProjectDock(
         state.noteSelected = 0;
         refreshNotes();
         rerender();
+        return;
+      }
+      if (row.what === "privacy") {
+        togglePrivacy();
         return;
       }
       done({ kind: "edit", project: state.project, what: row.what });
@@ -475,7 +497,7 @@ export async function runProjectDock(
         if (matchesKey(data, "escape")) {
           if (state.stage === "notes") {
             state.stage = "edit";
-            state.fileSelected = 2;
+            state.fileSelected = NOTES_FILE_ROW;
             refreshNotes();
             rerender();
             return;

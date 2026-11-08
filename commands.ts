@@ -12,6 +12,7 @@ import {
   projectDir,
   removeProject,
   renameProject,
+  setProjectPrivate,
   touchProject,
 } from "./registry.ts";
 import {
@@ -163,6 +164,7 @@ async function status(ctx: ExtensionCommandContext, deps: Deps): Promise<void> {
     `Notes:    ${countNotes(deps.paths, active)} file(s) in ${notesDir(deps.paths, active)}`,
     `Index:    ${notesIndexPath(deps.paths, active)}`,
     `Sessions: ${summary?.count ?? 0}`,
+    `Protect:  ${active.private ? "private (excluded from INDEX.md)" : "shared"}`,
     `Storage:  ${deps.paths.root}`,
     `Pending:  ${deps.pending ? "queued switch" : "none"}`,
   ];
@@ -520,6 +522,7 @@ export function registerCommands(pi: ExtensionAPI, deps: Deps): void {
           "NOTES.md",
           "Notes",
           "AGENTS.md",
+          "Protection",
         ]);
         if (choice === "CONTEXT.md") return editContext(ctx, deps, project);
         if (choice === "NOTES.md") return openNotesIndex(ctx, deps, project);
@@ -534,6 +537,21 @@ export function registerCommands(pi: ExtensionAPI, deps: Deps): void {
           return;
         }
         if (choice === "AGENTS.md") return editAgents(ctx, deps, project);
+        if (choice === "Protection") {
+          const next = !project.private;
+          const ok = await ctx.ui.confirm(
+            next ? "Make project private?" : "Make project shared?",
+            next
+              ? "Its notes will be excluded from INDEX.md and all_project_notes."
+              : "Its notes will return to INDEX.md and all_project_notes.",
+          );
+          if (!ok) return;
+          setProjectPrivate(deps.paths, project.id, next);
+          rebuildIndexes(deps.paths);
+          deps.status.refresh(ctx);
+          ctx.ui.notify(`Project is now ${next ? "private" : "shared"}`, "info");
+          return;
+        }
         return;
       }
       if (what === "notes") {

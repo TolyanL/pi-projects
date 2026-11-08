@@ -120,7 +120,27 @@ test("files stage lists context, index, notes and AGENTS", () => {
   assert.match(lines, /Notes…/);
   assert.match(lines, /3 note.*generated index/);
   assert.match(lines, /AGENTS\.md/);
+  assert.match(lines, /Protection: shared/);
   assert.match(lines, /not created/);
+});
+
+test("files stage shows the protection state", () => {
+  const projects = state().projects;
+  const privateProject = { ...projects[0], private: true };
+  const lines = renderDock(
+    state({
+      projects: [privateProject, ...projects.slice(1)],
+      stage: "edit",
+      project: privateProject,
+      fileSelected: 3,
+      files: { context: true, index: true, agents: true, count: 1 },
+    }),
+    80,
+    24,
+    theme,
+  ).join("\n");
+  assert.match(lines, /→ Protection: private/);
+  assert.match(lines, /hidden from INDEX\.md and all_project_notes/);
 });
 
 test("missing files are marked as not created", () => {

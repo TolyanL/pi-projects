@@ -39,8 +39,8 @@ control-key combos:
 
 Selection copies pi's `/model` picker: `→` marks the cursor row, `✓` marks the
 current project, the selected label is accent-colored. `Files…` opens
-`CONTEXT.md` / `NOTES.md` / `Notes…` / `AGENTS.md`; after saving or
-cancelling the editor you land back in the files menu. `esc` goes one level up (files → actions →
+`CONTEXT.md` / `NOTES.md` / `AGENTS.md` / `Protection` / `Notes…`; after saving
+or cancelling the editor you land back in the files menu. `esc` goes one level up (files → actions →
 projects → editor), never straight out from a submenu.
 
 `/projects` opens a dock in pi's editor slot — the same idiom
@@ -81,7 +81,7 @@ Reload a running pi with `/reload`.
 | `/projects new <name>` | Open a project with a fresh session |
 | `/projects status` | Active project, paths, sizes, session count |
 | `/projects panel` | Alias for `/projects` (opens the dock) |
-| `/project` | Open the files menu for the current project (notes / context / AGENTS) |
+| `/project` | Files menu for the current project: context, index, notes, AGENTS, protection |
 | `/project notes` | Notes browser: open, edit, create notes |
 | `/project context` | Edit `CONTEXT.md` |
 | `/project agents` | Edit the repository's `AGENTS.md` |
@@ -206,7 +206,8 @@ it is replaced by `notes/` and the generated indexes.
 
 ### Project protection
 
-In a project's actions, `Protection: shared` toggles to `Protection: private`.
+In a project's actions **and** in the `/project` files menu, `Protection: shared`
+toggles to `Protection: private` (the `Notes…` entry sits below it).
 A private project:
 
 - is marked `🔒` in the project list;
