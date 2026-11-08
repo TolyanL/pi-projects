@@ -80,7 +80,8 @@ Reload a running pi with `/reload`.
 | `/projects new <name>` | Open a project with a fresh session |
 | `/projects status` | Active project, paths, sizes, session count |
 | `/projects panel` | Alias for `/projects` (opens the dock) |
-| `/project notes` | Edit `notes.md` in the built-in editor |
+| `/project` | Open the files menu for the current project (notes / context / AGENTS) |
+| `/project notes` | Edit `notes.md` directly |
 | `/project context` | Edit `CONTEXT.md` |
 | `/project agents` | Edit the repository's `AGENTS.md` |
 | `/project show` | Section map of `notes.md` (line numbers) |

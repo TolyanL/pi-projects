@@ -1,7 +1,6 @@
 {
   "name": "pi-projects",
   "version": "0.1.0",
-  "private": true,
   "description": "Projects dock, private context and notes for Pi",
   "type": "module",
   "keywords": [
@@ -32,5 +31,14 @@
   "scripts": {
     "test": "node --test test/*.test.ts",
     "spike": "node spike/harness.mjs && node spike/render.mjs"
+  },
+  "author": "TolyanL",
+  "homepage": "https://github.com/TolyanL/pi-projects#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TolyanL/pi-projects.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TolyanL/pi-projects/issues"
   }
 }
