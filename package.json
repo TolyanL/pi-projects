@@ -1,0 +1,36 @@
+{
+  "name": "pi-projects",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Projects dock, private context and notes for Pi",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "projects",
+    "notes"
+  ],
+  "license": "MIT",
+  "files": [
+    "index.ts",
+    "*.ts",
+    "README.md",
+    "DESIGN.md",
+    "DISCUSSION.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "spike": "node spike/harness.mjs && node spike/render.mjs"
+  }
+}
