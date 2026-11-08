@@ -80,6 +80,7 @@ function readJson<T>(file: string): T | undefined {
 
 export function ensureBaseDir(paths: ProjectPaths): void {
   ensureDir(paths.baseDir);
+  if (paths.root !== paths.baseDir) ensureDir(paths.root);
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +89,7 @@ export function ensureBaseDir(paths: ProjectPaths): void {
 
 function mergeConfig(raw: Partial<Config> | undefined): Config {
   return {
+    storage: { ...DEFAULT_CONFIG.storage, ...(raw?.storage ?? {}) },
     context: { ...DEFAULT_CONFIG.context, ...(raw?.context ?? {}) },
     notes: { ...DEFAULT_CONFIG.notes, ...(raw?.notes ?? {}) },
     pickerShortcut: raw?.pickerShortcut ?? DEFAULT_CONFIG.pickerShortcut,
@@ -114,6 +116,7 @@ function normalizeProject(raw: Project): Project | undefined {
     path: raw.path,
     addedAt: raw.addedAt ?? new Date(0).toISOString(),
     lastOpenedAt: raw.lastOpenedAt ?? raw.addedAt ?? new Date(0).toISOString(),
+    private: raw.private === true,
   };
 }
 
@@ -242,6 +245,7 @@ export function addProject(
       path: real,
       addedAt: now,
       lastOpenedAt: now,
+      private: false,
     };
     current.projects.push(project);
     current.activeId = project.id;
@@ -275,6 +279,18 @@ export function removeProject(
     return current;
   });
   return { project: removed, registry };
+}
+
+export function setProjectPrivate(
+  paths: ProjectPaths,
+  projectId: string,
+  value: boolean,
+): void {
+  updateRegistry(paths, (current) => {
+    const project = current.projects.find((entry) => entry.id === projectId);
+    if (project) project.private = value;
+    return current;
+  });
 }
 
 export function touchProject(paths: ProjectPaths, projectId: string): void {

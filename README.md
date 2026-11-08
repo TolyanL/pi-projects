@@ -31,6 +31,7 @@ control-key combos:
 │   Files…                                          │
 │   Rename project…                                 │
 │   Remove from list…                               │
+│   Protection: shared                              │
 ├───────────────────────────────────────────────────┤
 │ ↑↓ move · enter select · esc back to projects     │
 └───────────────────────────────────────────────────┘
@@ -38,8 +39,8 @@ control-key combos:
 
 Selection copies pi's `/model` picker: `→` marks the cursor row, `✓` marks the
 current project, the selected label is accent-colored. `Files…` opens
-`notes.md` / `CONTEXT.md` / `AGENTS.md`; after saving or cancelling the editor
-you land back in the files menu. `esc` goes one level up (files → actions →
+`CONTEXT.md` / `NOTES.md` / `Notes…` / `AGENTS.md`; after saving or
+cancelling the editor you land back in the files menu. `esc` goes one level up (files → actions →
 projects → editor), never straight out from a submenu.
 
 `/projects` opens a dock in pi's editor slot — the same idiom
@@ -81,10 +82,11 @@ Reload a running pi with `/reload`.
 | `/projects status` | Active project, paths, sizes, session count |
 | `/projects panel` | Alias for `/projects` (opens the dock) |
 | `/project` | Open the files menu for the current project (notes / context / AGENTS) |
-| `/project notes` | Edit `notes.md` directly |
+| `/project notes` | Notes browser: open, edit, create notes |
 | `/project context` | Edit `CONTEXT.md` |
 | `/project agents` | Edit the repository's `AGENTS.md` |
-| `/project show` | Section map of `notes.md` (line numbers) |
+| `/project index` | View the generated `NOTES.md` |
+| `/project show` | List notes with descriptions and paths |
 | `ctrl+shift+p` | Open the dock (falls back to `ctrl+shift+o`) |
 
 ### Dock keys
@@ -94,7 +96,7 @@ Reload a running pi with `/reload`.
 | type | fuzzy filter over project name and path (projects level) |
 | `↑`/`↓`, `pgUp`/`pgDn` | move |
 | `enter` | open the project's actions / run the highlighted action / open the file |
-| `esc` | one level up: files → actions → projects → close |
+| `esc` | one level up: notes → files → actions → projects → close |
 
 Every action is a selectable row: open, new session, new terminal tab, sessions,
 files, add, rename, remove.
@@ -117,70 +119,102 @@ project trust.
   kitty, Windows Terminal, iTerm2 and Terminal.app; otherwise it shows a
   `cd <path> && pi` command to run manually.
 
-## Private files
+## Storage layout
+
+Default root is `~/.pi/agent/pi-projects`; change it with `storage.root` in the
+config (absolute, `~/...`, or relative to `<agent-dir>/pi-projects`).
 
 ```
-~/.pi/agent/pi-projects/
+<root>/
   registry.json              project list
-  config.json                context/notes settings
   drafts.json                unsent editor text per project
+  INDEX.md                   generated index across every project
   <slug>-<id8>/
     CONTEXT.md               private context, injected into every request
-    notes.md                 agent notes, compact summary injected
-    archive/YYYY-MM.md       rotated old log entries
+    NOTES.md                 generated index of this project's notes
+    notes/
+      how-auth-works.md      one note per file
+      header-only-sessions.md
 ```
 
 - Files are `0600`, directories `0700`, writes are atomic (tmp + rename).
-- `AGENTS.md` stays in the repository (shared with the team); `CONTEXT.md` is the
-  personal layer that never enters the repo.
-- **Nothing is created automatically.** Adding a project or switching to it writes
-  no files. In the dock's `Files…` screen missing entries are marked
-  `not created`; pressing enter asks for confirmation, creates the template
-  and opens the editor. `notes.md` is also created by the first
-  `project_notes` write (log/decide/gotcha/open).
-- `CONTEXT.md` is injected as the `pi_projects_private` system-prompt section,
-  capped at `context.maxChars` (32k). A one-time warning appears above 8k chars.
+- `config.json` always stays in `<agent-dir>/pi-projects/`, even when the data
+  root is moved.
+- `AGENTS.md` stays in the repository (shared with the team); `CONTEXT.md` and
+  notes never enter the repo.
+- **Nothing is created automatically.** Adding a project or switching to it
+  writes no files. In the dock's `Files…` screen missing entries are marked
+  `not created`; pressing enter asks for confirmation, creates the template and
+  opens the editor.
 
-### notes.md
+### Notes
 
-A strict, machine-managed schema. The agent writes through the `project_notes`
-tool; manual edits are allowed and the table of contents is rebuilt on the next
-write.
+Each note is a markdown file in `notes/` with frontmatter:
 
 ```md
-# Notes — pi-extensions
+---
+title: How auth works
+description: Token refresh and middleware order
+created: 2026-02-14
+updated: 2026-02-14
+---
 
-<!-- toc: managed by pi-projects; do not edit by hand -->
-- Focus
-- Decisions
-- Gotchas
-- Open
-- Log
-<!-- /toc -->
+# How auth works
 
-## Focus
-- ship the picker
-
-## Decisions
-- 2026-02-14 panel is always expanded
-
-## Gotchas
-- 2026-02-14 switchSession always aborts the run
-
-## Open
-- 2026-02-14 language of the UI
-
-## Log
-
-### 2026-02-14
-- verified header-only sessions
+Details live here.
 ```
 
-`project_notes` actions: `read` (CONTEXT.md + notes.md + section map), `log`,
-`decide`, `gotcha`, `open`, `set_focus`, `search`. The prompt gets `Focus`,
-`Decisions`, `Gotchas`, an open-question count and the last few log entries; the
-full file is one tool call away. Old log blocks rotate into `archive/` when the
-file exceeds `notes.maxLines`.
+Both indexes are **generated** by scanning `notes/*.md`, so hand-written files
+show up too:
+
+`NOTES.md` (per project):
+
+```md
+- **How auth works** — Token refresh and middleware order — `notes/how-auth-works.md`
+```
+
+`INDEX.md` (all shared projects, one heading per project; projects marked
+private are skipped):
+
+```md
+## pi-extensions
+- **How auth works** — Token refresh and middleware order — `pi-extensions-18a5b3ed/notes/how-auth-works.md`
+```
+
+The system prompt receives `CONTEXT.md` plus the first `notes.promptEntries`
+index entries (title, description, path). Full notes are one tool call away.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `project_notes` | `list` (current project index), `read` (by file or title), `write` (title + description + content; replaces a note with the same title), `append`, `search` |
+| `all_project_notes` | The generated cross-project `INDEX.md`: titles, descriptions and paths of every note in every shared project |
+
+```
+/project              files menu: CONTEXT.md / NOTES.md / Notes… / AGENTS.md
+/project notes        notes browser: open, edit, create
+/project context      edit CONTEXT.md
+/project agents       edit the repository's AGENTS.md
+/project index        view the generated NOTES.md (edits are discarded)
+/project status       paths, counts, storage root
+/project show         note list with paths
+```
+
+The old strict-schema `notes.md` (Focus/Decisions/Log) is deleted on startup;
+it is replaced by `notes/` and the generated indexes.
+
+### Project protection
+
+In a project's actions, `Protection: shared` toggles to `Protection: private`.
+A private project:
+
+- is marked `🔒` in the project list;
+- is excluded from the global `INDEX.md` and from `all_project_notes`;
+- keeps its own `NOTES.md`, `notes/`, `CONTEXT.md` and prompt injection intact.
+
+Files are not encrypted and stay readable on disk; this hides the project from
+cross-project lists only.
 
 ## Configuration
 
@@ -188,17 +222,23 @@ file exceeds `notes.maxLines`.
 
 ```json
 {
-  "context": { "maxChars": 32768, "warnChars": 8192, "promptNotesChars": 4096 },
-  "notes": { "maxLines": 200, "tailEntries": 5, "focusLines": 3 },
+  "storage": { "root": "" },
+  "context": { "maxChars": 32768, "warnChars": 8192 },
+  "notes": { "promptEntries": 12, "promptChars": 4096, "maxNoteChars": 200000 },
   "pickerShortcut": "ctrl+shift+p"
 }
 ```
+
+`storage.root`: empty means `~/.pi/agent/pi-projects`; accepts `~/...` and
+relative paths (resolved from `<agent-dir>/pi-projects`). Change it, then
+`/reload`: existing projects are not moved automatically.
+
 
 The old `panel` block from earlier versions is ignored and can be deleted.
 
 ## Privacy and secrets
 
-`CONTEXT.md` and `notes.md` are never written into the repository. They are,
+`CONTEXT.md` and note files are never written into the repository. They are,
 however, injected into the model context, so their content reaches:
 
 - the session transcript (`~/.pi/agent/sessions/.../*.jsonl`),

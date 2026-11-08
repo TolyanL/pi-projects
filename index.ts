@@ -15,6 +15,7 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createPaths } from "./format.ts";
 import { ensureBaseDir, ensureFirstProject, loadConfig } from "./registry.ts";
+import { rebuildIndexes } from "./notes.ts";
 import { createStatus } from "./status.ts";
 import { registerContext } from "./context.ts";
 import { registerNotesTool } from "./notes-tool.ts";
@@ -23,9 +24,12 @@ import type { Deps } from "./deps.ts";
 
 export default function piProjects(pi: ExtensionAPI): void {
   const agentDir = getAgentDir();
-  const paths = createPaths(agentDir);
+  // config.json always lives in <agent-dir>/pi-projects; its storage.root may
+  // point the data (registry, projects, INDEX.md) somewhere else.
+  const bootstrap = createPaths(agentDir);
+  const config = loadConfig(bootstrap);
+  const paths = createPaths(agentDir, config);
   ensureBaseDir(paths);
-  const config = loadConfig(paths);
 
   const deps: Deps = {
     pi,
@@ -45,8 +49,10 @@ export default function piProjects(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     try {
       if (ctx.hasUI) ensureFirstProject(paths, agentDir, ctx.cwd);
+      // Refresh generated indexes and drop the old strict-schema notes.md.
+      rebuildIndexes(paths);
     } catch {
-      // registry problems must not block startup
+      // registry/index problems must not block startup
     }
     status.setWorking(!ctx.isIdle(), ctx);
     void status.refresh(ctx);

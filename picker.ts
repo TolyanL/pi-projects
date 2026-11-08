@@ -6,12 +6,11 @@
  * scrollable, the dock takes the bottom rows while it is open, and closing it
  * (esc) gives the editor back. Nothing is drawn when the dock is closed.
  *
- * Three levels: project list → actions for one project → files. Selection
- * styling mirrors pi's model picker: `→` cursor, `✓` for the current project,
- * accent for the selection. The only keys are arrows, enter, esc and typing a
- * filter.
+ * Levels: projects → project actions → files → notes. Selection styling mirrors
+ * pi's model picker: `→` cursor, `✓` for the current project, accent selection.
  */
 
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionCommandContext, SessionInfo, Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -22,19 +21,22 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { Deps } from "./deps.ts";
-import type { Project, SessionSummary } from "./types.ts";
-import { findByCwd, loadRegistry } from "./registry.ts";
-import { projectFileExists } from "./store.ts";
+import type { NoteMeta, Project, SessionSummary } from "./types.ts";
+import { findByCwd, loadRegistry, setProjectPrivate } from "./registry.ts";
 import { loadSessionIndex, listSessionsFor } from "./sessions.ts";
+import { countNotes, listNotes, notesIndexPath, rebuildIndexes } from "./notes.ts";
+import { projectFileExists } from "./store.ts";
 import { fit, formatAge, projectMeta, shortPath } from "./format.ts";
 
-export type EditWhat = "notes" | "context" | "agents";
+export type EditWhat = "context" | "index" | "agents";
 
 export type DockAction =
   | { kind: "open"; project: Project; mode: "last" | "new" }
   | { kind: "tab"; project: Project }
   | { kind: "sessions"; project: Project }
   | { kind: "edit"; project: Project; what: EditWhat }
+  | { kind: "note-open"; project: Project; file: string }
+  | { kind: "note-new"; project: Project }
   | { kind: "add" }
   | { kind: "remove"; project: Project }
   | { kind: "rename"; project: Project };
@@ -42,10 +44,19 @@ export type DockAction =
 export type PickerAction = DockAction;
 
 export interface DockOpenOptions {
-  stage?: "projects" | "project" | "edit";
+  stage?: "projects" | "project" | "edit" | "notes";
   project?: Project;
   /** Files-only mount: esc from the files level closes the dock. */
   filesOnly?: boolean;
+  /** Highlight this note when the dock opens on the notes level. */
+  noteFile?: string;
+}
+
+export interface FileStatus {
+  context: boolean;
+  index: boolean;
+  agents: boolean;
+  count: number;
 }
 
 export interface DockState {
@@ -55,16 +66,17 @@ export interface DockState {
   query: string;
   /** Index in the project list, including the trailing Add row. */
   selected: number;
-  stage: "projects" | "project" | "edit";
+  stage: "projects" | "project" | "edit" | "notes";
   project?: Project;
   actionSelected: number;
-  editSelected: number;
-  /** Which files already exist (missing ones are offered for creation). */
-  files?: { notes?: boolean; context?: boolean; agents?: boolean };
+  fileSelected: number;
+  noteSelected: number;
+  files?: FileStatus;
+  noteList?: NoteMeta[];
 }
 
 interface ActionSpec {
-  id: "open" | "new" | "tab" | "sessions" | "files" | "rename" | "remove";
+  id: "open" | "new" | "tab" | "sessions" | "files" | "rename" | "remove" | "privacy";
   label: string;
 }
 
@@ -76,12 +88,14 @@ const ACTIONS: ActionSpec[] = [
   { id: "files", label: "Files…" },
   { id: "rename", label: "Rename project…" },
   { id: "remove", label: "Remove from list…" },
+  { id: "privacy", label: "Protection" },
 ];
 
-const EDIT_OPTIONS: Array<{ what: EditWhat; label: string; hint: string }> = [
-  { what: "notes", label: "notes.md", hint: "agent notes, strict schema" },
-  { what: "context", label: "CONTEXT.md", hint: "private context, injected into every request" },
-  { what: "agents", label: "AGENTS.md", hint: "repository instructions (shared, in git)" },
+const FILE_ROWS: Array<{ what: EditWhat | "notes"; label: string }> = [
+  { what: "context", label: "CONTEXT.md" },
+  { what: "index", label: "NOTES.md" },
+  { what: "notes", label: "Notes…" },
+  { what: "agents", label: "AGENTS.md" },
 ];
 
 /** Rows the dock may use: about 60% of the terminal, capped and floored. */
@@ -114,17 +128,13 @@ export function selectedProject(state: DockState): Project | undefined {
   return filteredProjects(state)[state.selected];
 }
 
-export function clampSelection(state: DockState): void {
-  const count = projectRowCount(state);
-  state.selected = Math.max(0, Math.min(state.selected, count - 1));
-  state.actionSelected = Math.max(0, Math.min(state.actionSelected, ACTIONS.length - 1));
-  state.editSelected = Math.max(0, Math.min(state.editSelected, EDIT_OPTIONS.length - 1));
-}
-
-export function selectionLabel(state: DockState): string {
-  const project = selectedProject(state);
-  if (project) return `project ${project.name}`;
-  return "add project";
+export function fileStatusFor(paths: Deps["paths"], project: Project): FileStatus {
+  return {
+    context: projectFileExists(paths, project, "context"),
+    index: existsSync(notesIndexPath(paths, project)),
+    agents: projectFileExists(paths, project, "agents"),
+    count: countNotes(paths, project),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +175,8 @@ function currentMark(current: boolean, theme: Theme): string {
 
 function projectLine(state: DockState, project: Project, selected: boolean, theme: Theme, inner: number): string {
   const active = project.id === state.activeId;
-  const name = selected ? theme.fg("accent", project.name) : project.name;
+  const lock = project.private ? ` ${theme.fg("warning", "🔒")}` : "";
+  const name = `${selected ? theme.fg("accent", project.name) : project.name}${lock}`;
   const path = theme.fg("muted", shortPath(project.path));
   const meta = theme.fg("muted", projectMeta(state.sessions.get(resolve(project.path))));
   const left = `${cursor(selected, theme)}${currentMark(active, theme)}${name} ${path}`;
@@ -175,9 +186,34 @@ function projectLine(state: DockState, project: Project, selected: boolean, them
   return `${clipped}${" ".repeat(gap)}${meta}`;
 }
 
+function labeledRow(label: string, hint: string, selected: boolean, theme: Theme, inner: number): string {
+  const left = `${cursor(selected, theme)}${selected ? theme.fg("accent", label) : label}`;
+  const leftWidth = Math.max(1, inner - visibleWidth(hint) - 1);
+  const clipped = truncateToWidth(left, leftWidth, "…");
+  const gap = Math.max(1, inner - visibleWidth(clipped) - visibleWidth(hint));
+  return `${clipped}${" ".repeat(gap)}${hint}`;
+}
+
 function windowStart(count: number, selected: number, visible: number): number {
   if (count <= visible) return 0;
   return Math.max(0, Math.min(selected - Math.floor(visible / 2), count - visible));
+}
+
+function fileHint(state: DockState, what: EditWhat | "notes"): string {
+  const files = state.files;
+  if (what === "context") {
+    return files?.context ? "private context, injected into every request" : "not created";
+  }
+  if (what === "agents") {
+    return files?.agents ? "repository instructions (shared, in git)" : "not created";
+  }
+  if (what === "index") {
+    if (!files || files.count === 0) return files?.index ? "empty index" : "no notes yet";
+    return `${files.count} note${files.count === 1 ? "" : "s"} · generated index`;
+  }
+  return files && files.count > 0
+    ? `${files.count} note${files.count === 1 ? "" : "s"} · browse, open, create`
+    : "browse, create notes";
 }
 
 export function renderDock(state: DockState, width: number, budget: number, theme: Theme): string[] {
@@ -187,19 +223,11 @@ export function renderDock(state: DockState, width: number, budget: number, them
 
   if (state.stage === "edit" && state.project) {
     lines.push(topBorder("Project files", width, state.project.name));
-    EDIT_OPTIONS.forEach((option, index) => {
-      const selected = index === state.editSelected;
-      const label = `${cursor(selected, theme)}${
-        selected ? theme.fg("accent", option.label) : option.label
-      }`;
-      const exists = state.files?.[option.what] ?? true;
-      const hint = exists
-        ? theme.fg("muted", option.hint)
-        : theme.fg("warning", "not created");
-      const leftWidth = Math.max(1, inner - visibleWidth(hint) - 1);
-      const left = truncateToWidth(label, leftWidth, "…");
-      const gap = Math.max(1, inner - visibleWidth(left) - visibleWidth(hint));
-      lines.push(boxLine(`${left}${" ".repeat(gap)}${hint}`, width));
+    FILE_ROWS.forEach((row, index) => {
+      const selected = index === state.fileSelected;
+      lines.push(
+        boxLine(labeledRow(row.label, theme.fg("muted", fileHint(state, row.what)), selected, theme, inner), width),
+      );
     });
     lines.push(separator(width));
     lines.push(boxLine(theme.fg("muted", "↑↓ move · enter open · esc back to project"), width));
@@ -207,13 +235,58 @@ export function renderDock(state: DockState, width: number, budget: number, them
     return lines;
   }
 
+  if (state.stage === "notes" && state.project) {
+    const notes = state.noteList ?? [];
+    const rows = 1 + notes.length;
+    lines.push(topBorder("Notes", width, `${state.project.name} · ${notes.length}`));
+    const itemRows = Math.max(1, budget - 6);
+    const start = windowStart(rows, state.noteSelected, itemRows);
+    const end = Math.min(rows, start + itemRows);
+    for (let index = start; index < end; index += 1) {
+      if (index === 0) {
+        const selected = state.noteSelected === 0;
+        const label = selected ? theme.fg("accent", "＋ New note…") : "＋ New note…";
+        lines.push(boxLine(`${cursor(selected, theme)}${label}`, width));
+        continue;
+      }
+      const note = notes[index - 1];
+      const selected = index === state.noteSelected;
+      const title = selected ? theme.fg("accent", note.title) : note.title;
+      const description = theme.fg("muted", note.description);
+      const gap = theme.fg("muted", " · ");
+      const meta = theme.fg("muted", `notes/${note.file}${note.updated ? ` · ${note.updated}` : ""}`);
+      const left = `${cursor(selected, theme)}${title}${note.description ? `${gap}${description}` : ""}`;
+      const leftWidth = Math.max(1, inner - visibleWidth(meta) - 1);
+      const clipped = truncateToWidth(left, leftWidth, "…");
+      const spaces = Math.max(1, inner - visibleWidth(clipped) - visibleWidth(meta));
+      lines.push(boxLine(`${clipped}${" ".repeat(spaces)}${meta}`, width));
+    }
+    if (notes.length === 0) {
+      lines.push(boxLine(theme.fg("muted", "No notes yet — create the first one"), width));
+    }
+    lines.push(separator(width));
+    lines.push(boxLine(theme.fg("muted", "↑↓ move · enter open · esc back to files"), width));
+    lines.push(bottom(width));
+    return lines;
+  }
+
   if (state.stage === "project" && state.project) {
-    lines.push(topBorder("Project actions", width, state.project.name));
+    lines.push(
+      topBorder(
+        "Project actions",
+        width,
+        `${state.project.name}${state.project.private ? " 🔒" : ""}`,
+      ),
+    );
     const itemRows = Math.max(1, budget - 5);
     const start = windowStart(ACTIONS.length, state.actionSelected, itemRows);
     ACTIONS.slice(start, start + itemRows).forEach((action, offset) => {
       const selected = start + offset === state.actionSelected;
-      const label = selected ? theme.fg("accent", action.label) : action.label;
+      const text =
+        action.id === "privacy"
+          ? `Protection: ${state.project?.private ? "private (hidden from global index)" : "shared"}`
+          : action.label;
+      const label = selected ? theme.fg("accent", text) : text;
       lines.push(boxLine(`${cursor(selected, theme)}${label}`, width));
     });
     lines.push(separator(width));
@@ -229,7 +302,7 @@ export function renderDock(state: DockState, width: number, budget: number, them
   lines.push(boxLine(`${theme.fg("accent", "/")} ${state.query}${state.query ? "▏" : ""}`, width));
   lines.push(separator(width));
 
-  const rows = projects.length + 1; // + Add project…
+  const rows = projects.length + 1;
   const itemRows = Math.max(1, budget - 6);
   const start = windowStart(rows, state.selected, itemRows);
   const end = Math.min(rows, start + itemRows);
@@ -307,23 +380,25 @@ export async function runProjectDock(
     sessions: sessions.byPath,
     query: "",
     selected: 0,
-    stage: stage === "project" || stage === "edit" ? stage : "projects",
+    stage: stage === "projects" ? "projects" : stage,
     project: stage === "projects" ? undefined : target,
     actionSelected: 0,
-    editSelected: 0,
+    fileSelected: 0,
+    noteSelected: 0,
   };
-  const fileStatus = (project: Project | undefined) =>
-    project
-      ? {
-          notes: projectFileExists(deps.paths, project, "notes"),
-          context: projectFileExists(deps.paths, project, "context"),
-          agents: projectFileExists(deps.paths, project, "agents"),
-        }
-      : {};
-  if (state.stage !== "projects" && target) state.files = fileStatus(target);
   if (state.stage === "projects" && target) {
     const index = projects.findIndex((project) => project.id === target.id);
     state.selected = index >= 0 ? index : 0;
+  }
+  if (target) {
+    state.files = fileStatusFor(deps.paths, target);
+    if (state.stage === "notes") {
+      state.noteList = listNotes(deps.paths, target);
+      const index = options.noteFile
+        ? state.noteList.findIndex((note) => note.file === options.noteFile)
+        : -1;
+      state.noteSelected = index >= 0 ? index + 1 : 0;
+    }
   }
 
   const filesOnly = options.filesOnly === true;
@@ -331,13 +406,30 @@ export async function runProjectDock(
     const budget = dockBudget(tui);
     const rerender = () => (tui as { requestRender: () => void }).requestRender();
 
+    const refreshNotes = () => {
+      if (!state.project) return;
+      state.files = fileStatusFor(deps.paths, state.project);
+      state.noteList = listNotes(deps.paths, state.project);
+    };
+
     const runAction = (action: ActionSpec) => {
       const project = state.project;
       if (!project) return;
       if (action.id === "files") {
         state.stage = "edit";
-        state.editSelected = 0;
-        state.files = fileStatus(project);
+        state.fileSelected = 0;
+        state.files = fileStatusFor(deps.paths, project);
+        rerender();
+        return;
+      }
+      if (action.id === "privacy") {
+        const next = !project.private;
+        setProjectPrivate(deps.paths, project.id, next);
+        project.private = next;
+        const listed = state.projects.find((entry) => entry.id === project.id);
+        if (listed) listed.private = next;
+        rebuildIndexes(deps.paths);
+        state.files = fileStatusFor(deps.paths, project);
         rerender();
         return;
       }
@@ -349,6 +441,29 @@ export async function runProjectDock(
       else if (action.id === "remove") done({ kind: "remove", project });
     };
 
+    const activateFileRow = () => {
+      const row = FILE_ROWS[state.fileSelected];
+      if (!row || !state.project) return;
+      if (row.what === "notes") {
+        state.stage = "notes";
+        state.noteSelected = 0;
+        refreshNotes();
+        rerender();
+        return;
+      }
+      done({ kind: "edit", project: state.project, what: row.what });
+    };
+
+    const activateNote = () => {
+      if (!state.project) return;
+      if (state.noteSelected === 0) {
+        done({ kind: "note-new", project: state.project });
+        return;
+      }
+      const note = state.noteList?.[state.noteSelected - 1];
+      if (note) done({ kind: "note-open", project: state.project, file: note.file });
+    };
+
     return {
       render: (width: number) => renderDock(state, width, budget, theme),
       invalidate: () => {},
@@ -358,6 +473,13 @@ export async function runProjectDock(
           return;
         }
         if (matchesKey(data, "escape")) {
+          if (state.stage === "notes") {
+            state.stage = "edit";
+            state.fileSelected = 2;
+            refreshNotes();
+            rerender();
+            return;
+          }
           if (state.stage === "edit") {
             if (filesOnly) {
               done(undefined);
@@ -381,27 +503,36 @@ export async function runProjectDock(
           return;
         }
 
-        if (state.stage === "edit") {
+        if (state.stage === "notes") {
+          const count = (state.noteList?.length ?? 0) + 1;
           if (matchesKey(data, "up")) {
-            state.editSelected =
-              (state.editSelected - 1 + EDIT_OPTIONS.length) % EDIT_OPTIONS.length;
+            state.noteSelected = (state.noteSelected - 1 + count) % count;
             rerender();
           } else if (matchesKey(data, "down")) {
-            state.editSelected = (state.editSelected + 1) % EDIT_OPTIONS.length;
+            state.noteSelected = (state.noteSelected + 1) % count;
             rerender();
           } else if (matchesKey(data, "return")) {
-            const option = EDIT_OPTIONS[state.editSelected];
-            if (option && state.project) {
-              done({ kind: "edit", project: state.project, what: option.what });
-            }
+            activateNote();
+          }
+          return;
+        }
+
+        if (state.stage === "edit") {
+          if (matchesKey(data, "up")) {
+            state.fileSelected = (state.fileSelected - 1 + FILE_ROWS.length) % FILE_ROWS.length;
+            rerender();
+          } else if (matchesKey(data, "down")) {
+            state.fileSelected = (state.fileSelected + 1) % FILE_ROWS.length;
+            rerender();
+          } else if (matchesKey(data, "return")) {
+            activateFileRow();
           }
           return;
         }
 
         if (state.stage === "project") {
           if (matchesKey(data, "up")) {
-            state.actionSelected =
-              (state.actionSelected - 1 + ACTIONS.length) % ACTIONS.length;
+            state.actionSelected = (state.actionSelected - 1 + ACTIONS.length) % ACTIONS.length;
             rerender();
           } else if (matchesKey(data, "down")) {
             state.actionSelected = (state.actionSelected + 1) % ACTIONS.length;
@@ -440,6 +571,7 @@ export async function runProjectDock(
             state.project = project;
             state.stage = "project";
             state.actionSelected = 0;
+            state.files = fileStatusFor(deps.paths, project);
             rerender();
           } else {
             done({ kind: "add" });

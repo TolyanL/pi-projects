@@ -1,231 +1,217 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { Project, ProjectPaths } from "../types.ts";
-import { createPaths } from "../format.ts";
-import { createProjectFile, projectFileExists } from "../store.ts";
+import { basename, join } from "node:path";
+import type { Project } from "../types.ts";
+import { createPaths, DEFAULT_CONFIG } from "../format.ts";
+import { addProject, projectDir, setProjectPrivate } from "../registry.ts";
 import {
-  appendEntry,
-  archiveDir,
-  contextTemplate,
-  detectSecret,
-  loadNotes,
-  notesHaveContent,
-  notesPath,
-  notesTemplate,
-  parseNotes,
-  readNotesText,
-  renderNotes,
-  renderNotesForPrompt,
-  rotateNotes,
-  sectionMap,
-  setFocus,
-  writeNotes,
-} from "../store.ts";
+  cleanupLegacyNotes,
+  globalIndexText,
+  listNotes,
+  notesDir,
+  notesIndexPath,
+  parseNote,
+  projectIndexText,
+  promptNoteIndex,
+  readNote,
+  rebuildGlobalIndex,
+  rebuildProjectIndex,
+  searchProjectNotes,
+  writeNote,
+  writeNoteBody,
+} from "../notes.ts";
 
-function fixture(): { paths: ProjectPaths; project: Project; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "pi-projects-store-"));
-  const paths = createPaths(dir);
+function fixture() {
+  const dir = mkdtempSync(join(tmpdir(), "pi-notes-"));
+  const agentDir = join(dir, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const paths = createPaths(agentDir);
+  const repo = join(dir, "repo");
+  mkdirSync(repo, { recursive: true });
   const project: Project = {
     id: "11111111-2222-3333-4444-555555555555",
     name: "demo",
-    path: join(dir, "repo"),
+    path: repo,
     addedAt: new Date().toISOString(),
     lastOpenedAt: new Date().toISOString(),
   };
-  createProjectFile(paths, project, "context");
-  createProjectFile(paths, project, "notes");
-  return { paths, project, dir };
+  const { project: registered } = addProject(paths, agentDir, { path: repo, name: "demo" });
+  return { dir, paths, project, registered: registered ?? project };
 }
 
-test("templates contain every canonical section and a managed toc", () => {
-  const project: Project = {
-    id: "x",
-    name: "demo",
-    path: "/tmp/demo",
-    addedAt: "",
-    lastOpenedAt: "",
-  };
-  const notes = notesTemplate(project);
-  for (const name of ["Focus", "Decisions", "Gotchas", "Open", "Log"]) {
-    assert.match(notes, new RegExp(`^## ${name}$`, "m"));
-  }
-  assert.match(notes, /<!-- toc: managed by pi-projects/);
-  assert.match(notes, /<!-- \/toc -->/);
-  assert.match(contextTemplate(project), /# demo/);
-});
-
-test("parse and render round-trip keeps section bodies", () => {
-  const project: Project = {
-    id: "x",
-    name: "demo",
-    path: "/tmp/demo",
-    addedAt: "",
-    lastOpenedAt: "",
-  };
-  const parsed = parseNotes(notesTemplate(project));
-  appendEntry(parsed, "Decisions", "use header-only sessions");
-  const text = renderNotes(project.name, parsed);
-  const again = parseNotes(text);
-  const decisions = again.sections.find((entry) => entry.name === "Decisions");
-  assert.ok(decisions);
-  assert.match(decisions!.lines.join("\n"), /use header-only sessions/);
-  assert.equal(testCountToc(text), 5);
-});
-
-function testCountToc(text: string): number {
-  const match = /<!-- toc:[\s\S]*?<!-- \/toc -->/.exec(text);
-  if (!match) return 0;
-  return match[0].split("\n").filter((line) => line.startsWith("- ")).length;
-}
-
-test("log entries group under today's date", () => {
-  const project: Project = {
-    id: "x",
-    name: "demo",
-    path: "/tmp/demo",
-    addedAt: "",
-    lastOpenedAt: "",
-  };
-  const parsed = parseNotes(notesTemplate(project));
-  appendEntry(parsed, "Log", "first finding", "2026-02-14");
-  appendEntry(parsed, "Log", "second finding", "2026-02-14");
-  const text = renderNotes(project.name, parsed);
-  assert.equal((text.match(/### 2026-02-14/g) ?? []).length, 1);
-  assert.match(text, /- first finding/);
-  assert.match(text, /- second finding/);
-});
-
-test("non-log entries are date-prefixed, focus is not", () => {
-  const project: Project = {
-    id: "x",
-    name: "demo",
-    path: "/tmp/demo",
-    addedAt: "",
-    lastOpenedAt: "",
-  };
-  const parsed = parseNotes(notesTemplate(project));
-  appendEntry(parsed, "Gotchas", "switch aborts the run", "2026-02-14");
-  setFocus(parsed, "ship M1", 3);
-  const text = renderNotes(project.name, parsed);
-  assert.match(text, /- 2026-02-14 switch aborts the run/);
-  assert.match(text, /## Focus\n- ship M1/);
-});
-
-test("focus respects the line limit", () => {
-  const parsed = parseNotes(notesTemplate({ name: "demo" } as Project));
-  assert.throws(() => setFocus(parsed, "a\nb\nc\nd", 3), /limited to 3/);
-});
-
-test("section map points at real 1-based lines", () => {
-  const project: Project = {
-    id: "x",
-    name: "demo",
-    path: "/tmp/demo",
-    addedAt: "",
-    lastOpenedAt: "",
-  };
-  const parsed = parseNotes(notesTemplate(project));
-  appendEntry(parsed, "Log", "hello", "2026-02-14");
-  const text = renderNotes(project.name, parsed);
-  const map = sectionMap(text);
-  const lines = text.split("\n");
-  for (const entry of map) {
-    assert.equal(lines[entry.start - 1], `## ${entry.section}`);
-    assert.ok(entry.lines >= 1);
-  }
-  assert.equal(map.length, 5);
-});
-
-test("writes notes, tracks content and rotates the oldest log block", () => {
+test("nothing is created until the first note is written", () => {
   const { paths, project } = fixture();
-  const parsed = parseNotes(notesTemplate(project));
-  appendEntry(parsed, "Log", "old entry 1", "2026-01-01");
-  appendEntry(parsed, "Log", "old entry 2", "2026-01-02");
-  appendEntry(parsed, "Log", "today", "2026-02-14");
-  const written = writeNotes(paths, project, parsed, 2);
-  assert.ok(written.archived.length > 0, "expected rotation");
-  const text = readFileSync(notesPath(paths, project), "utf8");
-  assert.doesNotMatch(text, /old entry 1/);
-  assert.match(text, /today/);
-  assert.ok(existsSync(archiveDir(paths, project)));
-  const archived = readdirSync(archiveDir(paths, project));
-  assert.equal(archived.length, 1, "one file per month");
-  const archivedText = readFileSync(join(archiveDir(paths, project), archived[0]), "utf8");
-  assert.match(archivedText, /old entry 1/);
-  assert.match(archivedText, /old entry 2/);
-  assert.ok(notesHaveContent(paths, project));
+  assert.deepEqual(listNotes(paths, project), []);
+  assert.equal(existsSync(notesIndexPath(paths, project)), false);
+  assert.equal(existsSync(paths.indexFile), false);
+  rebuildProjectIndex(paths, project);
+  assert.equal(existsSync(notesIndexPath(paths, project)), false);
 });
 
-test("files are created only on demand", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-projects-demand-"));
-  const paths = createPaths(dir);
-  const project: Project = {
-    id: "x",
-    name: "demo",
-    path: join(dir, "repo"),
-    addedAt: new Date().toISOString(),
-    lastOpenedAt: new Date().toISOString(),
-  };
-  mkdirSync(project.path, { recursive: true });
-  assert.equal(projectFileExists(paths, project, "notes"), false);
-  assert.equal(projectFileExists(paths, project, "context"), false);
-  assert.equal(projectFileExists(paths, project, "agents"), false);
-  createProjectFile(paths, project, "agents");
-  assert.equal(projectFileExists(paths, project, "agents"), true);
-  assert.ok(existsSync(join(project.path, "AGENTS.md")));
-  createProjectFile(paths, project, "notes");
-  assert.equal(projectFileExists(paths, project, "notes"), true);
+test("writeNote creates a note file with frontmatter and both indexes", () => {
+  const { paths, registered } = fixture();
+  const result = writeNote(paths, registered, {
+    title: "How auth works",
+    description: "Token refresh and middleware order",
+    content: "Details live here.",
+  });
+  assert.equal(result.created, true);
+  assert.equal(result.meta.file, "how-auth-works.md");
+
+  const file = join(notesDir(paths, registered), result.meta.file);
+  const raw = readFileSync(file, "utf8");
+  assert.match(raw, /^---\ntitle: How auth works/);
+  assert.match(raw, /description: Token refresh and middleware order/);
+  assert.match(raw, /# How auth works/);
+  assert.match(raw, /Details live here\./);
+
+  const index = readFileSync(notesIndexPath(paths, registered), "utf8");
+  assert.match(index, /- \*\*How auth works\*\* — Token refresh and middleware order — `notes\/how-auth-works\.md`/);
+
+  const global = readFileSync(paths.indexFile, "utf8");
+  assert.match(global, /## demo/);
+  assert.match(
+    global,
+    new RegExp(`${basename(projectDir(paths, registered))}/notes/how-auth-works\\.md`),
+  );
 });
 
-test("template alone has no content", () => {
+test("readNote resolves by title and by file", () => {
+  const { paths, registered } = fixture();
+  writeNote(paths, registered, { title: "How auth works", description: "d", content: "Body" });
+  const byTitle = readNote(paths, registered, "How auth works");
+  const byFile = readNote(paths, registered, "how-auth-works.md");
+  assert.equal(byTitle?.meta.file, "how-auth-works.md");
+  assert.equal(byFile?.meta.title, "How auth works");
+  assert.match(byTitle?.body ?? "", /Body/);
+});
+
+test("writing the same title updates the note instead of duplicating it", () => {
+  const { paths, registered } = fixture();
+  writeNote(paths, registered, { title: "Same", description: "one", content: "first" });
+  const second = writeNote(paths, registered, { title: "same", description: "two", content: "second" });
+  assert.equal(second.created, false);
+  assert.equal(readdirSync(notesDir(paths, registered)).length, 1);
+  const doc = readNote(paths, registered, "same");
+  assert.match(doc?.body ?? "", /second/);
+  assert.equal(doc?.meta.description, "two");
+});
+
+test("hand-written notes without frontmatter still get indexed", () => {
+  const { paths, registered } = fixture();
+  const dir = notesDir(paths, registered);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manual.md"), "# Manual note\n\nWhat this note is about.\n");
+  const notes = listNotes(paths, registered);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].title, "Manual note");
+  assert.equal(notes[0].description, "What this note is about.");
+  rebuildProjectIndex(paths, registered);
+  assert.match(
+    readFileSync(notesIndexPath(paths, registered), "utf8"),
+    /- \*\*Manual note\*\* — What this note is about\. — `notes\/manual\.md`/,
+  );
+});
+
+test("append extends the body and bumps updated", () => {
+  const { paths, registered } = fixture();
+  const note = writeNote(paths, registered, { title: "Journal", description: "d", content: "one" });
+  writeNoteBody(paths, registered, note.meta.file, "one\n\ntwo");
+  const doc = readNote(paths, registered, note.meta.file);
+  assert.match(doc?.body ?? "", /one\n\ntwo/);
+  assert.match(doc?.meta.updated ?? "", /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test("legacy notes.md is removed", () => {
   const { paths, project } = fixture();
-  assert.equal(notesHaveContent(paths, project), false);
+  const legacy = join(projectDir(paths, project), "notes.md");
+  mkdirSync(join(projectDir(paths, project)), { recursive: true });
+  writeFileSync(legacy, "old schema");
+  assert.equal(cleanupLegacyNotes(paths, project), true);
+  assert.equal(existsSync(legacy), false);
 });
 
-test("compact prompt rendering is budgeted and includes focus/decisions", () => {
-  const project: Project = {
-    id: "x",
-    name: "demo",
-    path: "/tmp/demo",
-    addedAt: "",
-    lastOpenedAt: "",
-  };
-  const parsed = parseNotes(notesTemplate(project));
-  setFocus(parsed, "ship M1", 3);
-  appendEntry(parsed, "Decisions", "use header-only sessions", "2026-02-14");
-  appendEntry(parsed, "Log", "ran harness", "2026-02-14");
-  const summary = renderNotesForPrompt(project, parsed, 5, 10000);
-  assert.match(summary, /ship M1/);
-  assert.match(summary, /header-only sessions/);
-  assert.match(summary, /ran harness/);
-  const tiny = renderNotesForPrompt(project, parsed, 5, 40);
-  assert.ok(tiny.length <= 40);
-  assert.ok(tiny.endsWith("…"));
+test("prompt index respects entry and character budgets", () => {
+  const { paths, registered } = fixture();
+  for (let index = 0; index < 5; index += 1) {
+    writeNote(paths, registered, {
+      title: `Note ${index}`,
+      description: `description ${index}`,
+      content: "x",
+    });
+  }
+  const notes = listNotes(paths, registered);
+  const text = promptNoteIndex(notes, 2, 10_000);
+  assert.equal(text.split("\n").length, 3);
+  assert.match(text, /…3 more notes/);
+  assert.ok(promptNoteIndex(notes, 5, 30).length <= 30);
 });
 
-test("secret detection flags tokens and assignments", () => {
-  assert.match(detectSecret("token = abcdef123456") ?? "", /token/);
-  assert.match(detectSecret("sk-abcdefghijklmnopqrstuvwx") ?? "", /sk-/);
-  assert.equal(detectSecret("ordinary prose about tokens"), undefined);
-  assert.equal(detectSecret("<!-- token = something -->"), undefined);
+test("search finds text in note bodies", () => {
+  const { paths, registered } = fixture();
+  writeNote(paths, registered, {
+    title: "Auth",
+    description: "d",
+    content: "refresh tokens happen here",
+  });
+  const results = searchProjectNotes(paths, registered, "refresh");
+  assert.equal(results.length, 1);
+  assert.equal(results[0].file, "auth.md");
 });
 
-test("unknown sections survive and are listed in the toc", () => {
-  const text = [
-    "# Notes — demo",
-    "",
-    "## Focus",
-    "- ship",
-    "",
-    "## Scratchpad",
-    "- custom section",
-    "",
-  ].join("\n");
-  const parsed = parseNotes(text);
-  const rendered = renderNotes("demo", parsed);
-  assert.match(rendered, /## Scratchpad\n- custom section/);
-  assert.match(rendered, /- Scratchpad/);
+test("parseNote falls back to the first heading", () => {
+  const parsed = parseNote("# Title\n\nDescription line\n\nBody\n");
+  assert.equal(parsed.meta.title, "Title");
+  assert.equal(parsed.meta.description, "Description line");
+  assert.match(parsed.body, /Body/);
+});
+
+test("global index can be rendered without writing", () => {
+  const { paths, registered } = fixture();
+  writeNote(paths, registered, { title: "A", description: "aa", content: "x" });
+  const text = globalIndexText(paths, [{ project: registered, notes: listNotes(paths, registered) }]);
+  assert.match(text, /# Notes — all projects/);
+  assert.match(text, /## demo/);
+  assert.match(text, /\*\*A\*\* — aa/);
+  rebuildGlobalIndex(paths);
+  assert.ok(existsSync(paths.indexFile));
+});
+
+test("projectIndexText and empty state", () => {
+  const { project } = fixture();
+  assert.match(projectIndexText(project, []), /_No notes yet\._/);
+});
+
+test("private projects stay out of the global index", () => {
+  const { paths, registered } = fixture();
+  writeNote(paths, registered, { title: "Secret", description: "hidden", content: "x" });
+  const projectIndex = readFileSync(notesIndexPath(paths, registered), "utf8");
+  assert.match(projectIndex, /Secret/);
+
+  setProjectPrivate(paths, registered.id, true);
+  rebuildGlobalIndex(paths);
+  const privateGlobal = readFileSync(paths.indexFile, "utf8");
+  assert.doesNotMatch(privateGlobal, /Secret/);
+  assert.doesNotMatch(privateGlobal, /## demo/);
+  // the project's own index keeps working
+  assert.match(readFileSync(notesIndexPath(paths, registered), "utf8"), /Secret/);
+
+  setProjectPrivate(paths, registered.id, false);
+  rebuildGlobalIndex(paths);
+  assert.match(readFileSync(paths.indexFile, "utf8"), /Secret/);
+});
+
+test("storage.root moves registry and indexes to another directory", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-root-"));
+  const root = join(dir, "store");
+  const paths = createPaths(dir, {
+    ...DEFAULT_CONFIG,
+    storage: { root },
+  });
+  assert.equal(paths.root, root);
+  assert.equal(paths.registryFile, join(root, "registry.json"));
+  assert.equal(paths.indexFile, join(root, "INDEX.md"));
+  assert.equal(paths.configFile, join(dir, "pi-projects", "config.json"));
 });

@@ -3,11 +3,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Deps } from "./deps.ts";
 import { findByCwd, loadRegistry } from "./registry.ts";
-import { loadNotes, readContext, renderNotesForPrompt } from "./store.ts";
+import { readContext } from "./store.ts";
+import { listNotes, promptNoteIndex } from "./notes.ts";
 
 const GUIDELINES = [
-  "Private project notes live outside the repository. Record durable decisions with project_notes action \"decide\", pitfalls with \"gotcha\", open questions with \"open\", and today's findings with \"log\".",
-  "Never copy CONTEXT.md, notes.md or the <pi_projects_private> section into files inside the repository.",
+  "Project notes live outside the repository as markdown files under notes/. Read them with project_notes action \"list\" or \"read\"; create one with \"write\" (title, description, content) and extend one with \"append\". NOTES.md is a generated index, never edit it.",
+  "Every other project has its own notes; all_project_notes lists their titles, descriptions and paths without switching projects.",
+  "Never copy CONTEXT.md, notes or the <pi_projects_private> section into files inside the repository.",
 ];
 
 export function registerContext(pi: ExtensionAPI, deps: Deps): void {
@@ -39,14 +41,16 @@ export function registerContext(pi: ExtensionAPI, deps: Deps): void {
     }
 
     try {
-      const notes = loadNotes(deps.paths, project);
-      const summary = renderNotesForPrompt(
-        project,
-        notes.parsed,
-        deps.config.notes.tailEntries,
-        deps.config.context.promptNotesChars,
+      const notes = listNotes(deps.paths, project);
+      const index = promptNoteIndex(
+        notes,
+        deps.config.notes.promptEntries,
+        deps.config.notes.promptChars,
       );
-      if (summary) event.systemPromptOptions.sections.pi_projects_notes = summary;
+      if (index) {
+        event.systemPromptOptions.sections.pi_projects_notes =
+          `Project: ${project.name}\nNotes are files under notes/; NOTES.md is the generated index.\n\n${index}`;
+      }
     } catch {
       // notes are best effort; never block a run because of them
     }

@@ -1,26 +1,29 @@
-/** The `project_notes` tool available to the agent. */
+/** Note tools available to the agent. */
 
 import { Type } from "typebox";
+import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Deps } from "./deps.ts";
-import type { NotesSection } from "./store.ts";
+import type { Project, ProjectPaths } from "./types.ts";
 import { findByCwd, loadRegistry } from "./registry.ts";
 import {
-  appendEntry,
-  contextPath,
-  loadNotes,
-  notesPath,
-  projectFileExists,
-  readContext,
-  searchNotes,
-  setFocus,
-  writeNotes,
-  type ParsedNotes,
-} from "./store.ts";
+  appendNote,
+  globalIndexText,
+  listNotes,
+  notesDir,
+  notesIndexPath,
+  projectIndexText,
+  readNote,
+  rebuildIndexes,
+  rebuildProjectIndex,
+  searchProjectNotes,
+  writeNote,
+} from "./notes.ts";
 
 export const NOTES_TOOL = "project_notes";
+export const ALL_NOTES_TOOL = "all_project_notes";
 
-const ACTIONS = ["read", "log", "decide", "gotcha", "open", "set_focus", "search"] as const;
+const ACTIONS = ["list", "read", "write", "append", "search"] as const;
 type Action = (typeof ACTIONS)[number];
 
 function requireProject(deps: Deps, cwd: string) {
@@ -33,13 +36,15 @@ function requireProject(deps: Deps, cwd: string) {
   return project;
 }
 
-function formatMap(parsed: ParsedNotes): string {
-  const lines: string[] = [];
-  for (const section of parsed.sections) {
-    const body = section.lines.filter((line) => line.trim() !== "");
-    lines.push(`## ${section.name} (${body.length} line(s))`);
-  }
-  return lines.join("\n");
+function formatNoteList(paths: ProjectPaths, project: Project): string {
+  const notes = listNotes(paths, project);
+  if (notes.length === 0) return "No notes yet.";
+  return notes
+    .map(
+      (note) =>
+        `- ${note.title}${note.description ? ` — ${note.description}` : ""} (notes/${note.file})`,
+    )
+    .join("\n");
 }
 
 export function registerNotesTool(pi: ExtensionAPI, deps: Deps): void {
@@ -47,51 +52,119 @@ export function registerNotesTool(pi: ExtensionAPI, deps: Deps): void {
     name: NOTES_TOOL,
     label: "Project Notes",
     description:
-      "Read and update private notes for the current project. Notes live outside the repository, survive sessions, and are injected into the system prompt in compact form. Actions: read (full CONTEXT.md + notes.md + section map), log (today's findings), decide (durable decision), gotcha (pitfall), open (open question), set_focus (1-3 current lines), search.",
+      "Notes for the current project, stored outside the repository as markdown files in notes/. NOTES.md is a generated index (title — description — path). Actions: list (index), read (one note by file or title), write (create or replace a note: title + description + content), append (extend an existing note), search (substring across notes).",
     parameters: Type.Object({
       action: Type.String({ enum: [...ACTIONS] }),
-      text: Type.Optional(Type.String({ description: "Entry text for log/decide/gotcha/open/set_focus" })),
-      query: Type.Optional(Type.String({ description: "Search query for action=search" })),
+      title: Type.Optional(Type.String({ description: "Note title (write) or reference (read/append)" })),
+      description: Type.Optional(Type.String({ description: "One-line description for the index" })),
+      content: Type.Optional(Type.String({ description: "Markdown body for write/append" })),
+      file: Type.Optional(Type.String({ description: "Note file name for read/append" })),
+      query: Type.Optional(Type.String({ description: "Search query" })),
     }),
-    async execute(_toolCallId, params: { action: Action; text?: string; query?: string }, _signal, _onUpdate, ctx) {
+    async execute(
+      _toolCallId,
+      params: {
+        action: Action;
+        title?: string;
+        description?: string;
+        content?: string;
+        file?: string;
+        query?: string;
+      },
+      _signal,
+      _onUpdate,
+      ctx,
+    ) {
       const project = requireProject(deps, ctx.cwd);
-      const notes = loadNotes(deps.paths, project);
+
+      if (params.action === "list") {
+        rebuildProjectIndex(deps.paths, project);
+        const notes = listNotes(deps.paths, project);
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                notes.length === 0
+                  ? `No notes yet in ${project.name}. Create one with action "write" (title, description, content).`
+                  : `${projectIndexText(project, notes)}\nNotes directory: ${notesDir(deps.paths, project)}`,
+            },
+          ],
+          details: { path: notesIndexPath(deps.paths, project), count: notes.length },
+        };
+      }
 
       if (params.action === "read") {
-        const contextExists = projectFileExists(deps.paths, project, "context");
-        const notesExists = projectFileExists(deps.paths, project, "notes");
-        const context = contextExists ? readContext(deps.paths, project).trim() : "";
-        const body = [
-          `# CONTEXT.md (${contextPath(deps.paths, project)})${contextExists ? "" : " — not created yet"}`,
-          "",
-          contextExists
-            ? context || "(empty)"
-            : "(not created yet — create it from /projects → a project → Files…)",
-          "",
-          `# notes.md (${notesPath(deps.paths, project)})${notesExists ? "" : " — not created yet"}`,
-          "",
-          notesExists
-            ? notes.text.trim()
-            : "(not created yet — log/decide/gotcha will create it)",
-        ].join("\n");
+        const ref = params.file ?? params.title;
+        if (!ref) throw new Error("file or title is required for action=read");
+        const doc = readNote(deps.paths, project, ref);
+        if (!doc) throw new Error(`Note not found: ${ref}\n${formatNoteList(deps.paths, project)}`);
         return {
-          content: [{ type: "text", text: body }],
-          details: {
-            path: notesPath(deps.paths, project),
-            sections: notes.map.map((entry) => `${entry.section}:${entry.start}+${entry.lines}`),
-          },
+          content: [
+            {
+              type: "text",
+              text: [
+                `# ${doc.meta.title}`,
+                doc.meta.description ? `Description: ${doc.meta.description}` : "",
+                `File: notes/${doc.meta.file}`,
+                doc.meta.updated ? `Updated: ${doc.meta.updated}` : "",
+                "",
+                doc.body.trim() || "(empty)",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            },
+          ],
+          details: { file: doc.meta.file, path: doc.path, title: doc.meta.title },
+        };
+      }
+
+      if (params.action === "write") {
+        const title = params.title?.trim();
+        if (!title) throw new Error("title is required for action=write");
+        if (params.content && params.content.length > deps.config.notes.maxNoteChars) {
+          throw new Error(
+            `content is too large (${params.content.length} chars, limit ${deps.config.notes.maxNoteChars})`,
+          );
+        }
+        const result = writeNote(deps.paths, project, {
+          title,
+          description: params.description,
+          content: params.content,
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `${result.created ? "Created" : "Updated"} notes/${result.meta.file}${
+                result.meta.description ? ` — ${result.meta.description}` : ""
+              }`,
+            },
+          ],
+          details: { file: result.meta.file, path: result.path, created: result.created },
+        };
+      }
+
+      if (params.action === "append") {
+        const ref = params.file ?? params.title;
+        if (!ref) throw new Error("file or title is required for action=append");
+        if (!params.content?.trim()) throw new Error("content is required for action=append");
+        const meta = appendNote(deps.paths, project, ref, params.content);
+        return {
+          content: [{ type: "text", text: `Appended to notes/${meta.file}` }],
+          details: { file: meta.file, title: meta.title },
         };
       }
 
       if (params.action === "search") {
         const query = params.query?.trim();
         if (!query) throw new Error("query is required for action=search");
-        const results = searchNotes(deps.paths, project, query);
+        const results = searchProjectNotes(deps.paths, project, query);
         const text =
           results.length === 0
-            ? `No matches for "${query}" in CONTEXT.md, notes.md or the archive.`
+            ? `No matches for "${query}" in ${project.name} notes.`
             : results
-                .map((entry) => `${entry.file.split("/").slice(-2).join("/")}:${entry.line}: ${entry.text}`)
+                .map((entry) => `notes/${entry.file}:${entry.line}: ${entry.text}`)
                 .join("\n");
         return {
           content: [{ type: "text", text }],
@@ -99,35 +172,40 @@ export function registerNotesTool(pi: ExtensionAPI, deps: Deps): void {
         };
       }
 
-      if (params.action === "set_focus") {
-        const text = params.text?.trim();
-        if (!text) throw new Error("text is required for action=set_focus");
-        setFocus(notes.parsed, text, deps.config.notes.focusLines);
-        const written = writeNotes(deps.paths, project, notes.parsed, deps.config.notes.maxLines);
-        return {
-          content: [{ type: "text", text: `Focus updated (${written.text.split("\n").length} lines total).` }],
-          details: { path: notesPath(deps.paths, project), sections: written.map },
-        };
-      }
+      throw new Error(`Unknown action: ${params.action}`);
+    },
+  });
 
-      const text = params.text?.trim();
-      if (!text) throw new Error(`text is required for action=${params.action}`);
-      const section: NotesSection =
-        params.action === "log" ? "Log" : params.action === "decide" ? "Decisions" : params.action === "gotcha" ? "Gotchas" : "Open";
-      appendEntry(notes.parsed, section, text);
-      const written = writeNotes(deps.paths, project, notes.parsed, deps.config.notes.maxLines);
-      const archived = written.archived.length > 0 ? ` Rotated ${written.archived.length} old log block(s) to the archive.` : "";
+  pi.registerTool({
+    name: ALL_NOTES_TOOL,
+    label: "All Project Notes",
+    description:
+      "List note titles, descriptions and paths across every shared project, in the same format as NOTES.md (with project headings). Private projects are excluded. Use it to see what other projects already know without switching sessions; read the full note with project_notes after opening that project.",
+    parameters: Type.Object({}),
+    async execute() {
+      rebuildIndexes(deps.paths);
+      const registry = loadRegistry(deps.paths);
+      // Projects marked private are invisible to cross-project tools.
+      const shared = registry.projects.filter((project) => !project.private);
+      const entries = shared.map((project) => ({
+        project,
+        notes: listNotes(deps.paths, project),
+      }));
+      const total = entries.reduce((sum, entry) => sum + entry.notes.length, 0);
+      const text =
+        total === 0
+          ? "No shared notes in any project."
+          : existsSync(deps.paths.indexFile)
+            ? readFileSync(deps.paths.indexFile, "utf8")
+            : globalIndexText(deps.paths, entries);
       return {
-        content: [{ type: "text", text: `Appended to ${section}.${archived}` }],
+        content: [{ type: "text", text }],
         details: {
-          path: notesPath(deps.paths, project),
-          section,
-          sections: written.map,
-          archived: written.archived,
+          projects: shared.length,
+          notes: total,
+          path: deps.paths.indexFile,
         },
       };
     },
   });
 }
-
-export { formatMap };

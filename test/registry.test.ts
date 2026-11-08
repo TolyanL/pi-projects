@@ -15,6 +15,7 @@ import {
   projectDir,
   removeProject,
   saveConfig,
+  setProjectPrivate,
   saveDraft,
   takeDraft,
   validateProjectPath,
@@ -77,16 +78,28 @@ test("removes projects without touching disk", () => {
   assert.equal(validateProjectPath(repo, agentDir).ok, true);
 });
 
+test("projects can be marked private", () => {
+  const { agentDir, repo, paths } = setup();
+  const { project } = addProject(paths, agentDir, { path: repo });
+  assert.equal(project!.private, false);
+  setProjectPrivate(paths, project!.id, true);
+  const loaded = loadRegistry(paths).projects.find((entry) => entry.id === project!.id);
+  assert.equal(loaded?.private, true);
+  setProjectPrivate(paths, project!.id, false);
+  assert.equal(loadRegistry(paths).projects[0].private, false);
+});
+
 test("config merges defaults and persists", () => {
   const { paths } = setup();
   const defaults = loadConfig(paths);
   assert.equal(defaults.context.maxChars, 32768);
-  assert.equal(defaults.notes.maxLines, 200);
+  assert.equal(defaults.storage.root, "");
+  assert.equal(defaults.notes.promptEntries, 12);
   assert.equal(defaults.pickerShortcut, "ctrl+shift+p");
-  defaults.notes.maxLines = 300;
+  defaults.notes.promptEntries = 30;
   saveConfig(paths, defaults);
   const loaded = loadConfig(paths);
-  assert.equal(loaded.notes.maxLines, 300);
+  assert.equal(loaded.notes.promptEntries, 30);
   assert.equal(loaded.context.warnChars, 8192);
 });
 

@@ -2,31 +2,48 @@
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Config, ProjectPaths, SessionSummary } from "./types.ts";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 export const DEFAULT_CONFIG: Config = {
+  storage: {
+    // Empty means `<agent-dir>/pi-projects`.
+    root: "",
+  },
   context: {
     maxChars: 32768,
     warnChars: 8192,
-    promptNotesChars: 4096,
   },
   notes: {
-    maxLines: 200,
-    tailEntries: 5,
-    focusLines: 3,
+    promptEntries: 12,
+    promptChars: 4096,
+    maxNoteChars: 200_000,
   },
   pickerShortcut: "ctrl+shift+p",
 };
 
-export function createPaths(agentDir: string): ProjectPaths {
+export function createPaths(agentDir: string, config?: Config): ProjectPaths {
   const baseDir = join(agentDir, "pi-projects");
+  const configured = config?.storage.root?.trim() ?? "";
+  const expanded = expandHomePath(configured);
+  const root = configured ? (isAbsolute(expanded) ? expanded : join(baseDir, expanded)) : baseDir;
   return {
     baseDir,
-    registryFile: join(baseDir, "registry.json"),
+    root,
     configFile: join(baseDir, "config.json"),
-    draftsFile: join(baseDir, "drafts.json"),
+    registryFile: join(root, "registry.json"),
+    draftsFile: join(root, "drafts.json"),
+    indexFile: join(root, "INDEX.md"),
   };
 }
+
+function expandHomePath(value: string): string {
+  const home = process.env.HOME;
+  if (!home) return value;
+  if (value === "~") return home;
+  if (value.startsWith("~/")) return join(home, value.slice(2));
+  return value;
+}
+
 
 /** `1`, `2`, `5` → `1s`, `2m`, `3h`, `4d`, `2w`. */
 export function formatAge(timestamp: number | undefined, now = Date.now()): string | undefined {

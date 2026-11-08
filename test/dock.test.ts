@@ -40,7 +40,8 @@ function state(overrides: Partial<DockState> = {}): DockState {
     selected: 0,
     stage: "projects",
     actionSelected: 0,
-    editSelected: 0,
+    fileSelected: 0,
+    noteSelected: 0,
     ...overrides,
   };
 }
@@ -101,32 +102,91 @@ test("project stage lists every action in the UI", () => {
   assert.match(lines, /→ Files…/);
 });
 
-test("files stage lists the three project files", () => {
-  const lines = renderDock(
-    state({ stage: "edit", project: state().projects[0], editSelected: 1 }),
-    70,
-    24,
-    theme,
-  ).join("\n");
-  assert.match(lines, /Project files/);
-  assert.match(lines, /→ CONTEXT\.md/);
-  assert.match(lines, /esc back to project/);
-});
-
-test("missing files are offered for creation in the files stage", () => {
+test("files stage lists context, index, notes and AGENTS", () => {
   const lines = renderDock(
     state({
       stage: "edit",
       project: state().projects[0],
-      editSelected: 0,
-      files: { notes: false, context: true, agents: true },
+      fileSelected: 1,
+      files: { context: true, index: true, agents: false, count: 3 },
     }),
     80,
     24,
     theme,
   ).join("\n");
-  assert.match(lines, /notes\.md/);
+  assert.match(lines, /Project files/);
+  assert.match(lines, /CONTEXT\.md/);
+  assert.match(lines, /→ NOTES\.md/);
+  assert.match(lines, /Notes…/);
+  assert.match(lines, /3 note.*generated index/);
+  assert.match(lines, /AGENTS\.md/);
   assert.match(lines, /not created/);
+});
+
+test("missing files are marked as not created", () => {
+  const lines = renderDock(
+    state({
+      stage: "edit",
+      project: state().projects[0],
+      fileSelected: 0,
+      files: { context: false, index: false, agents: false, count: 0 },
+    }),
+    80,
+    24,
+    theme,
+  ).join("\n");
+  assert.match(lines, /CONTEXT\.md\s+not created/);
+  assert.match(lines, /NOTES\.md\s+no notes yet/);
+});
+
+test("notes stage lists New note and existing notes", () => {
+  const lines = renderDock(
+    state({
+      stage: "notes",
+      project: state().projects[0],
+      noteSelected: 1,
+      noteList: [
+        { file: "auth.md", title: "How auth works", description: "token refresh", updated: "2026-02-14" },
+        { file: "sessions.md", title: "Header-only sessions", description: "switch", updated: "2026-02-13" },
+      ],
+    }),
+    80,
+    24,
+    theme,
+  ).join("\n");
+  assert.match(lines, /Notes/);
+  assert.match(lines, /＋ New note…/);
+  assert.match(lines, /→ How auth works/);
+  assert.match(lines, /notes\/auth\.md/);
+  assert.match(lines, /Header-only sessions/);
+});
+
+test("private projects carry a lock and the protection toggle", () => {
+  const projects = state().projects;
+  projects[0] = { ...projects[0], private: true };
+  const list = renderDock(state({ projects }), 80, 24, theme).join("\n");
+  assert.match(list, /🔒/);
+
+  const actions = renderDock(
+    state({
+      projects,
+      stage: "project",
+      project: projects[0],
+      actionSelected: 7,
+    }),
+    80,
+    24,
+    theme,
+  ).join("\n");
+  assert.match(actions, /→ Protection: private \(hidden from global index\)/);
+
+  const shared = renderDock(
+    state({ stage: "project", project: state().projects[1], actionSelected: 7 }),
+    80,
+    24,
+    theme,
+  ).join("\n");
+  assert.match(shared, /Protection: shared/);
 });
 
 test("typing filters projects and reports an empty state", () => {

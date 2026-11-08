@@ -1,5 +1,6 @@
-/** Slash commands for projects, private files and the dock. */
+/** Slash commands for projects, private context, files and notes. */
 
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Deps } from "./deps.ts";
@@ -16,17 +17,23 @@ import {
 import {
   createProjectFile,
   detectSecret,
-  loadNotes,
-  notesStats,
-  parseNotes,
   projectFileExists,
   projectFilePath,
   readContext,
-  readNotesText,
   writeContext,
-  writeNotes,
   type ProjectFile,
 } from "./store.ts";
+import {
+  countNotes,
+  listNotes,
+  notesDir,
+  notesIndexPath,
+  projectIndexText,
+  readNote,
+  rebuildIndexes,
+  writeNote,
+  writeNoteBody,
+} from "./notes.ts";
 import { applyPending, openProject, switchToSession } from "./switch.ts";
 import { shortPath } from "./format.ts";
 import { launchInNewTab } from "./launcher.ts";
@@ -35,11 +42,17 @@ import {
   runSessionDock,
   type DockAction,
   type DockOpenOptions,
+  type EditWhat,
 } from "./picker.ts";
 import { loadSessionIndex } from "./sessions.ts";
 
 const USAGE =
-  "/projects [dock | add <path> | remove <name> | new <name> | status]  ·  /project [notes|context|agents|status|show]";
+  "/projects [dock | add <path> | remove <name> | new <name> | status]  ·  /project [notes | context | agents | index | status | show]";
+
+const FILE_LABELS: Record<ProjectFile, string> = {
+  context: "CONTEXT.md",
+  agents: "AGENTS.md",
+};
 
 async function requireProject(
   ctx: ExtensionCommandContext,
@@ -118,13 +131,13 @@ async function removeProjectFlow(
   }
   const confirmed = await ctx.ui.confirm(
     "Remove project?",
-    `${target.name} will be removed from the list.\nFiles on disk and private notes are kept.`,
+    `${target.name} will be removed from the list.\nFiles on disk, context and notes are kept.`,
   );
   if (!confirmed) return;
   removeProject(deps.paths, target.id);
   deps.status.refresh(ctx);
   ctx.ui.notify(
-    `Removed ${target.name}. Private files kept in ${projectDir(deps.paths, target)}`,
+    `Removed ${target.name}. Files kept in ${projectDir(deps.paths, target)}`,
     "info",
   );
 }
@@ -139,7 +152,6 @@ async function status(ctx: ExtensionCommandContext, deps: Deps): Promise<void> {
     );
     return;
   }
-  const stats = notesStats(deps.paths, active);
   const context = readContext(deps.paths, active).trim().length;
   const sessions = await loadSessionIndex([active], ctx.sessionManager.getSessionDir(), ctx.cwd);
   const summary = sessions.byPath.get(resolve(active.path));
@@ -148,18 +160,14 @@ async function status(ctx: ExtensionCommandContext, deps: Deps): Promise<void> {
     `Path:     ${active.path}`,
     `Private:  ${projectDir(deps.paths, active)}`,
     `Context:  ${context} chars`,
-    `Notes:    ${stats.lines} lines (${stats.bytes} bytes)`,
+    `Notes:    ${countNotes(deps.paths, active)} file(s) in ${notesDir(deps.paths, active)}`,
+    `Index:    ${notesIndexPath(deps.paths, active)}`,
     `Sessions: ${summary?.count ?? 0}`,
+    `Storage:  ${deps.paths.root}`,
     `Pending:  ${deps.pending ? "queued switch" : "none"}`,
   ];
   ctx.ui.notify(lines.join("\n"), "info");
 }
-
-const FILE_LABELS: Record<ProjectFile, string> = {
-  notes: "notes.md",
-  context: "CONTEXT.md",
-  agents: "AGENTS.md",
-};
 
 /** Files are never prepared in the background: ask before creating one. */
 async function ensureFileForEdit(
@@ -177,32 +185,6 @@ async function ensureFileForEdit(
   if (!confirmed) return false;
   createProjectFile(deps.paths, project, file);
   return true;
-}
-
-export async function editNotes(
-  ctx: ExtensionCommandContext,
-  deps: Deps,
-  project: Project,
-): Promise<void> {
-  if (!(await ensureFileForEdit(ctx, deps, project, "notes"))) return;
-  const current = readNotesText(deps.paths, project);
-  const edited = await ctx.ui.editor(`notes.md — ${project.name}`, current);
-  if (edited === undefined) return;
-  const parsed = parseNotes(edited);
-  const written = writeNotes(deps.paths, project, parsed, deps.config.notes.maxLines);
-  const secret = detectSecret(written.text);
-  if (secret) {
-    ctx.ui.notify(
-      `Possible secret saved in notes.md: ${secret}\nIt will reach the model and the session transcript.`,
-      "warning",
-    );
-  }
-  const rotated = written.archived.length > 0 ? `, rotated ${written.archived.length} block(s)` : "";
-  ctx.ui.notify(
-    `Saved notes: ${written.map.length} sections, ${written.text.split("\n").length} lines${rotated}`,
-    "info",
-  );
-  deps.status.refresh(ctx);
 }
 
 export async function editContext(
@@ -252,42 +234,138 @@ export async function editAgents(
   ctx.ui.notify(`Saved ${file}`, "info");
 }
 
+export async function openNotesIndex(
+  ctx: ExtensionCommandContext,
+  deps: Deps,
+  project: Project,
+): Promise<void> {
+  rebuildIndexes(deps.paths);
+  const path = notesIndexPath(deps.paths, project);
+  if (!existsSync(path)) {
+    ctx.ui.notify(
+      `No notes yet in ${project.name}. Create one from Files… → Notes…`,
+      "info",
+    );
+    return;
+  }
+  const { readFileSync } = await import("node:fs");
+  const current = readFileSync(path, "utf8");
+  const edited = await ctx.ui.editor(`NOTES.md — ${project.name} (generated)`, current);
+  if (edited === undefined) return;
+  // The index is generated: discard edits and rebuild from notes/*.md.
+  rebuildIndexes(deps.paths);
+  ctx.ui.notify("NOTES.md is generated from notes/. Edits were discarded and the index rebuilt.", "warning");
+}
+
+export async function editNote(
+  ctx: ExtensionCommandContext,
+  deps: Deps,
+  project: Project,
+  file: string,
+): Promise<void> {
+  const doc = readNote(deps.paths, project, file);
+  if (!doc) {
+    ctx.ui.notify(`Note not found: ${file}`, "error");
+    return;
+  }
+  const edited = await ctx.ui.editor(`notes/${doc.meta.file} — ${project.name}`, doc.body);
+  if (edited === undefined) return;
+  writeNoteBody(deps.paths, project, doc.meta.file, edited);
+  ctx.ui.notify(`Saved notes/${doc.meta.file}`, "info");
+}
+
+export async function newNoteFlow(
+  ctx: ExtensionCommandContext,
+  deps: Deps,
+  project: Project,
+): Promise<string | undefined> {
+  const title = await ctx.ui.input("Note title", "");
+  if (!title?.trim()) return undefined;
+  const description = await ctx.ui.input("Description (one line)", "");
+  if (description === undefined) return undefined;
+  const content =
+    (await ctx.ui.editor(`notes/… — ${project.name}`, "")) ?? undefined;
+  if (content === undefined) return undefined;
+  const result = writeNote(deps.paths, project, {
+    title: title.trim(),
+    description: description.trim(),
+    content,
+  });
+  ctx.ui.notify(
+    `${result.created ? "Created" : "Updated"} notes/${result.meta.file}`,
+    "info",
+  );
+  return result.meta.file;
+}
+
 async function applyEdit(
   ctx: ExtensionCommandContext,
   deps: Deps,
   project: Project,
-  what: "notes" | "context" | "agents",
+  what: EditWhat,
 ): Promise<void> {
-  if (what === "notes") return editNotes(ctx, deps, project);
   if (what === "context") return editContext(ctx, deps, project);
-  return editAgents(ctx, deps, project);
+  if (what === "agents") return editAgents(ctx, deps, project);
+  return openNotesIndex(ctx, deps, project);
 }
 
-/**
- * One dock session: keep reopening the dock until an action replaces the
- * session (open/new) or the user closes it. Editors and the session list return
- * to the dock instead of dumping the user back into the editor.
- */
-async function projectFilesFlow(
+async function notesFlow(
   ctx: ExtensionCommandContext,
   deps: Deps,
   project: Project,
+  filesOnly = false,
 ): Promise<void> {
-  for (let guard = 0; guard < 20; guard += 1) {
-    const action = await runProjectDock(ctx, deps, {
-      stage: "edit",
-      project,
-      filesOnly: true,
-    });
+  let options: DockOpenOptions = { stage: "notes", project, filesOnly };
+  for (let guard = 0; guard < 30; guard += 1) {
+    const action = await runProjectDock(ctx, deps, options);
+    options = { stage: "notes", project, filesOnly };
     if (!action) return;
-    if (action.kind === "edit") {
-      await applyEdit(ctx, deps, action.project, action.what);
+    if (action.kind === "note-open") {
+      await editNote(ctx, deps, project, action.file);
+      options = { stage: "notes", project, filesOnly, noteFile: action.file };
+      continue;
+    }
+    if (action.kind === "note-new") {
+      const file = await newNoteFlow(ctx, deps, project);
+      options = { stage: "notes", project, filesOnly, noteFile: file };
       continue;
     }
     return;
   }
 }
 
+async function projectFilesFlow(
+  ctx: ExtensionCommandContext,
+  deps: Deps,
+  project: Project,
+): Promise<void> {
+  let options: DockOpenOptions = { stage: "edit", project, filesOnly: true };
+  for (let guard = 0; guard < 30; guard += 1) {
+    const action = await runProjectDock(ctx, deps, options);
+    options = { stage: "edit", project, filesOnly: true };
+    if (!action) return;
+    if (action.kind === "edit") {
+      await applyEdit(ctx, deps, project, action.what);
+      continue;
+    }
+    if (action.kind === "note-open") {
+      await editNote(ctx, deps, project, action.file);
+      options = { stage: "notes", project, filesOnly: true, noteFile: action.file };
+      continue;
+    }
+    if (action.kind === "note-new") {
+      const file = await newNoteFlow(ctx, deps, project);
+      options = { stage: "notes", project, filesOnly: true, noteFile: file };
+      continue;
+    }
+    return;
+  }
+}
+
+/**
+ * One dock session: keep reopening the dock until an action replaces the
+ * session (open/new) or the user closes it.
+ */
 async function projectDockFlow(ctx: ExtensionCommandContext, deps: Deps): Promise<void> {
   let options: DockOpenOptions | undefined;
   for (let guard = 0; guard < 30; guard += 1) {
@@ -302,6 +380,16 @@ async function projectDockFlow(ctx: ExtensionCommandContext, deps: Deps): Promis
     if (action.kind === "edit") {
       await applyEdit(ctx, deps, action.project, action.what);
       options = { stage: "edit", project: action.project };
+      continue;
+    }
+    if (action.kind === "note-open") {
+      await editNote(ctx, deps, action.project, action.file);
+      options = { stage: "notes", project: action.project, noteFile: action.file };
+      continue;
+    }
+    if (action.kind === "note-new") {
+      const file = await newNoteFlow(ctx, deps, action.project);
+      options = { stage: "notes", project: action.project, noteFile: file };
       continue;
     }
     if (action.kind === "sessions") {
@@ -420,7 +508,7 @@ export function registerCommands(pi: ExtensionAPI, deps: Deps): void {
   });
 
   pi.registerCommand("project", {
-    description: "Project files menu: notes, context, agents",
+    description: "Project files and notes: menu, context, agents, index",
     handler: async (args, ctx) => {
       const project = await requireProject(ctx, deps);
       if (!project) return;
@@ -428,30 +516,56 @@ export function registerCommands(pi: ExtensionAPI, deps: Deps): void {
       if (!what) {
         if (ctx.mode === "tui") return projectFilesFlow(ctx, deps, project);
         const choice = await ctx.ui.select("Project files", [
-          "notes.md",
           "CONTEXT.md",
+          "NOTES.md",
+          "Notes",
           "AGENTS.md",
         ]);
-        if (choice === "notes.md") return editNotes(ctx, deps, project);
         if (choice === "CONTEXT.md") return editContext(ctx, deps, project);
+        if (choice === "NOTES.md") return openNotesIndex(ctx, deps, project);
+        if (choice === "Notes") {
+          const notes = listNotes(deps.paths, project);
+          ctx.ui.notify(
+            notes.length === 0
+              ? "No notes yet"
+              : projectIndexText(project, notes),
+            "info",
+          );
+          return;
+        }
         if (choice === "AGENTS.md") return editAgents(ctx, deps, project);
         return;
       }
-      if (what === "notes") return editNotes(ctx, deps, project);
+      if (what === "notes") {
+        if (ctx.mode === "tui") return notesFlow(ctx, deps, project, true);
+        const notes = listNotes(deps.paths, project);
+        ctx.ui.notify(
+          notes.length === 0 ? "No notes yet" : projectIndexText(project, notes),
+          "info",
+        );
+        return;
+      }
       if (what === "context") return editContext(ctx, deps, project);
       if (what === "agents") return editAgents(ctx, deps, project);
+      if (what === "index") return openNotesIndex(ctx, deps, project);
       if (what === "status") return status(ctx, deps);
       if (what === "show") {
-        const notes = loadNotes(deps.paths, project);
+        const notes = listNotes(deps.paths, project);
         ctx.ui.notify(
-          notes.map.map((entry) => `${entry.section}: L${entry.start} (${entry.lines} lines)`).join("\n") ||
-            "notes.md is empty",
+          notes.length === 0
+            ? "No notes yet"
+            : notes
+                .map(
+                  (note) =>
+                    `${note.title}${note.description ? ` — ${note.description}` : ""} (notes/${note.file})`,
+                )
+                .join("\n"),
           "info",
         );
         return;
       }
       ctx.ui.notify(
-        "Usage: /project (files menu) | /project notes|context|agents|status|show",
+        "Usage: /project (files menu) | /project notes|context|agents|index|status|show",
         "warning",
       );
     },

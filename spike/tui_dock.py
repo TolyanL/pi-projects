@@ -57,17 +57,30 @@ try:
     send("\r", 0.8); time.sleep(0.8)
     t3 = len(raw)
     checks["Files action opens the files stage"] = "Project files" in plain(bytes(raw[:t3]))
+    checks["files stage lists the four rows"] = all(
+        label in plain(bytes(raw[:t3])) for label in ("CONTEXT.md", "NOTES.md", "Notes…", "AGENTS.md")
+    )
     checks["missing files are marked not created"] = "not created" in plain(bytes(raw[:t3]))
 
-    # enter on notes.md -> confirm create -> editor -> esc -> back to files
+    # enter on CONTEXT.md -> confirm create -> editor -> esc -> back to files
     send("\r", 0.5); time.sleep(0.9)
-    send("\r", 0.9); time.sleep(1.0)   # confirm "Create notes.md?"
+    send("\r", 0.9); time.sleep(1.0)   # confirm "Create CONTEXT.md?"
     t_before_editor_esc = len(raw)
     send("\x1b", 1.0); time.sleep(1.0)  # cancel the editor
     t_created = len(raw)
-    notes = glob.glob(os.path.join(agent, "pi-projects", "*", "notes.md"))
-    checks["confirm creates notes.md"] = len(notes) == 1
+    contexts = glob.glob(os.path.join(agent, "pi-projects", "*", "CONTEXT.md"))
+    checks["confirm creates CONTEXT.md"] = len(contexts) == 1
     checks["editor returns to the files stage"] = "Project files" in plain(bytes(raw[t_before_editor_esc:t_created]))
+
+    # down twice -> Notes… -> notes list; esc back to files
+    send("\x1b[B", 0.2); send("\x1b[B", 0.2); time.sleep(0.3)
+    send("\r", 0.6); time.sleep(0.9)
+    t_notes = len(raw)
+    checks["Notes row opens the notes list"] = "＋ New note…" in plain(bytes(raw[:t_notes]))
+    t_notes_back = len(raw)
+    send("\x1b", 0.8); time.sleep(0.8)
+    t_notes_done = len(raw)
+    checks["esc from notes returns to files"] = "Project files" in plain(bytes(raw[t_notes_back:t_notes_done]))
 
     t_back = len(raw)
     send("\x1b", 0.8); time.sleep(0.8)
