@@ -182,7 +182,7 @@ export function registerNotesTool(pi: ExtensionAPI, deps: Deps): void {
     description:
       "List note titles, descriptions and paths across every shared project, in the same format as NOTES.md (with project headings). Private projects are excluded, except the project you are working in: its own notes are included. Use it to see what other projects already know without switching sessions; read the full note with project_notes after opening that project.",
     parameters: Type.Object({}),
-    async execute() {
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       rebuildIndexes(deps.paths);
       const registry = loadRegistry(deps.paths);
       const current = findByCwd(registry, ctx.cwd);
