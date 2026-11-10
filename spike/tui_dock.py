@@ -43,7 +43,7 @@ try:
     send("/projects\r", 0.4); time.sleep(1.2)
     t1 = len(raw)
     checks["/projects opens the dock"] = "┌ Projects" in plain(bytes(raw[:t1]))
-    checks["transcript stays above"] = "v1.5.0" in plain(bytes(raw[:t1]))
+    checks["transcript stays above"] = "Pi can explain" in plain(bytes(raw[:t1])) or "Extensions" in plain(bytes(raw[:t1]))
     checks["Add project row is in the list"] = "Add project…" in plain(bytes(raw[:t1]))
 
     send("\r", 0.5); time.sleep(0.8)  # project -> actions

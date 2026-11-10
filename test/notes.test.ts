@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { Project } from "../types.ts";
 import { createPaths, DEFAULT_CONFIG } from "../format.ts";
-import { addProject, projectDir, setProjectPrivate } from "../registry.ts";
+import { addProject, loadRegistry, projectDir, setProjectPrivate } from "../registry.ts";
 import {
+  allNotesEntries,
   cleanupLegacyNotes,
   globalIndexText,
   listNotes,
@@ -201,6 +202,40 @@ test("private projects stay out of the global index", () => {
   setProjectPrivate(paths, registered.id, false);
   rebuildGlobalIndex(paths);
   assert.match(readFileSync(paths.indexFile, "utf8"), /Secret/);
+});
+
+test("all_project_notes includes the current project when it is private", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-allnotes-"));
+  const agentDir = join(dir, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const paths = createPaths(agentDir);
+  const build = (name: string, isPrivate: boolean) => {
+    const repo = join(dir, name);
+    mkdirSync(repo, { recursive: true });
+    const { project } = addProject(paths, agentDir, { path: repo, name });
+    if (project && isPrivate) setProjectPrivate(paths, project.id, true);
+    return project!;
+  };
+  const shared = build("shared", false);
+  const privateCurrent = build("private-current", true);
+  const privateOther = build("private-other", true);
+  for (const project of [shared, privateCurrent, privateOther]) {
+    writeNote(paths, project, { title: `Note ${project.name}`, description: "d", content: "x" });
+  }
+  const registry = loadRegistry(paths);
+
+  const fromPrivate = allNotesEntries(paths, registry.projects, privateCurrent);
+  assert.deepEqual(
+    fromPrivate.map((entry) => entry.project.name).sort(),
+    ["private-current", "shared"],
+  );
+  const text = globalIndexText(paths, fromPrivate);
+  assert.match(text, /Note shared/);
+  assert.match(text, /Note private-current/);
+  assert.doesNotMatch(text, /Note private-other/);
+
+  const fromShared = allNotesEntries(paths, registry.projects, shared);
+  assert.deepEqual(fromShared.map((entry) => entry.project.name), ["shared"]);
 });
 
 test("storage.root moves registry and indexes to another directory", () => {

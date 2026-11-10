@@ -17,9 +17,10 @@ context and notes kept outside the repository.
   header-only session file.
 - The extension never creates files on its own: missing entries are marked
   `not created` and are created only after explicit confirmation.
-- Projects can be marked `private` (Project actions → Protection). Private
-  projects are excluded from `INDEX.md` and `all_project_notes` but keep their
-  own notes, context and prompt injection.
+- Projects can be marked `private` (Project actions or `/project` → Protection).
+  Private projects are excluded from `INDEX.md` and `all_project_notes`, except
+  that the current project's own notes are included for the agent working in it.
+  They keep their notes, context and prompt injection.
 
 ## Commands
 

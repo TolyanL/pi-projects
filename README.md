@@ -189,7 +189,7 @@ index entries (title, description, path). Full notes are one tool call away.
 | Tool | What it does |
 |---|---|
 | `project_notes` | `list` (current project index), `read` (by file or title), `write` (title + description + content; replaces a note with the same title), `append`, `search` |
-| `all_project_notes` | The generated cross-project `INDEX.md`: titles, descriptions and paths of every note in every shared project |
+| `all_project_notes` | Cross-project index: titles, descriptions and paths of every note in shared projects, plus the current project when it is private |
 
 ```
 /project              files menu: CONTEXT.md / NOTES.md / Notes… / AGENTS.md
@@ -211,7 +211,9 @@ toggles to `Protection: private` (the `Notes…` entry sits below it).
 A private project:
 
 - is marked `🔒` in the project list;
-- is excluded from the global `INDEX.md` and from `all_project_notes`;
+- is excluded from the global `INDEX.md` and from `all_project_notes`
+  (exception: when the agent works **inside** that project, `all_project_notes`
+  includes its own notes so it can see them in the combined list);
 - keeps its own `NOTES.md`, `notes/`, `CONTEXT.md` and prompt injection intact.
 
 Files are not encrypted and stay readable on disk; this hides the project from

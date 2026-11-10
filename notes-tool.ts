@@ -1,12 +1,12 @@
 /** Note tools available to the agent. */
 
 import { Type } from "typebox";
-import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Deps } from "./deps.ts";
 import type { Project, ProjectPaths } from "./types.ts";
 import { findByCwd, loadRegistry } from "./registry.ts";
 import {
+  allNotesEntries,
   appendNote,
   globalIndexText,
   listNotes,
@@ -180,29 +180,26 @@ export function registerNotesTool(pi: ExtensionAPI, deps: Deps): void {
     name: ALL_NOTES_TOOL,
     label: "All Project Notes",
     description:
-      "List note titles, descriptions and paths across every shared project, in the same format as NOTES.md (with project headings). Private projects are excluded. Use it to see what other projects already know without switching sessions; read the full note with project_notes after opening that project.",
+      "List note titles, descriptions and paths across every shared project, in the same format as NOTES.md (with project headings). Private projects are excluded, except the project you are working in: its own notes are included. Use it to see what other projects already know without switching sessions; read the full note with project_notes after opening that project.",
     parameters: Type.Object({}),
     async execute() {
       rebuildIndexes(deps.paths);
       const registry = loadRegistry(deps.paths);
-      // Projects marked private are invisible to cross-project tools.
-      const shared = registry.projects.filter((project) => !project.private);
-      const entries = shared.map((project) => ({
-        project,
-        notes: listNotes(deps.paths, project),
-      }));
+      const current = findByCwd(registry, ctx.cwd);
+      // Private projects are hidden, except the one the agent is working in:
+      // its own notes still appear in the combined list.
+      const entries = allNotesEntries(deps.paths, registry.projects, current);
       const total = entries.reduce((sum, entry) => sum + entry.notes.length, 0);
       const text =
         total === 0
           ? "No shared notes in any project."
-          : existsSync(deps.paths.indexFile)
-            ? readFileSync(deps.paths.indexFile, "utf8")
-            : globalIndexText(deps.paths, entries);
+          : globalIndexText(deps.paths, entries);
       return {
         content: [{ type: "text", text }],
         details: {
-          projects: shared.length,
+          projects: entries.length,
           notes: total,
+          privateIncluded: Boolean(current?.private),
           path: deps.paths.indexFile,
         },
       };
